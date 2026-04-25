@@ -63,8 +63,6 @@ dependencies {
 
     implementation(libs.oniSeedBrowserModel)
 
-    implementation("com.dylibso.chicory:runtime:1.7.5")
-
     /*
      * Unit tests
      */

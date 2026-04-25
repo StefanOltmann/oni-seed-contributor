@@ -22,8 +22,8 @@ object Worldgen {
 
         // TODO Call the WASM worldgen service here.
         //  src/main/resources/worldgen/oni_wasm_bg.wasm
-        //  Use chicory to call generate()
-        //  Find the docs here: https://chicory.dev/docs/
+
+        // Use https://github.com/caoccao/Javet
 
         return ""
     }
