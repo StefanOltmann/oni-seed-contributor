@@ -2,7 +2,7 @@
 // `@tigin-backwards/oxygen-not-included-worldgen`.
 //
 // This is the single types entry point for the package. The nested
-// editor-bundle types (World, SubWorld, BiomeSettings, NoiseTree, etc.)
+// editor-bundle types (World, Subworld, BiomeSettings, NoiseTree, etc.)
 // live in `editor_settings.d.ts` and are re-exported here so consumers
 // can import every type by name from the package root.
 
@@ -33,7 +33,7 @@ import type {
   World,
   WeightedSubworldName,
   Sampler,
-  SubWorld,
+  Subworld,
   Feature,
   InternalMob,
   CountRange,
@@ -84,7 +84,7 @@ export type {
   World,
   WeightedSubworldName,
   Sampler,
-  SubWorld,
+  Subworld,
   Feature,
   InternalMob,
   CountRange,
@@ -125,6 +125,14 @@ export interface MapData {
   coordinate: string;
   seed: number;
   cluster_id: string;
+  /**
+   * Short cluster tag from the coord grammar, e.g. `SNDST-C`, `V-BAD-C`,
+   * `M-FRZ-C`, `VOLCA`. Matches the `coordinatePrefix` in the cluster
+   * YAML. Stable across seeds; use it to group results by cluster type
+   * without parsing the full coord string (prefixes can contain hyphens,
+   * so naive splitting is unreliable).
+   */
+  coordinate_prefix: string;
   /** Element ids, indexed by the `element_idx` values in each world's cell grid. */
   element_table: string[];
   /** Spaced Out hex-grid world locations. One entry per asteroid. */
@@ -172,14 +180,19 @@ export interface WorldMapData {
   height: number;
   is_starting: boolean;
   world_traits: string[];
-  /** u16 per cell, row-major (`width * height`). */
-  element_idx: number[];
-  mass: number[];
-  temperature: number[];
+  /**
+   * u16 per cell, row-major (`width * height`). Backed by a
+   * freshly-allocated JS typed array (`wasm-bindgen` copies out of
+   * WASM linear memory), so it's safe to retain across subsequent
+   * `worldgen.generate` calls without being invalidated.
+   */
+  element_idx: Uint16Array;
+  mass: Float32Array;
+  temperature: Float32Array;
   /** u8 per cell; 255 means no disease. */
-  disease_idx: number[];
+  disease_idx: Uint8Array;
   /** i32 per cell. */
-  disease_count: number[];
+  disease_count: Int32Array;
   biome_cells: BiomeCell[];
   geysers: GeyserSpawn[];
   buildings: EntitySpawn[];
@@ -189,8 +202,19 @@ export interface WorldMapData {
 
 export interface BiomeCell {
   id: number;
-  /** Subworld type path. */
+  /** Subworld type path, e.g. `"expansion1::subworlds/jungle/med_Jungle"`. */
   type: string;
+  /**
+   * The Subworld's `ZoneType` enum value as a string — one of
+   * `"FrozenWastes" | "CrystalCaverns" | "BoggyMarsh" | "Sandstone"
+   * | "ToxicJungle" | "MagmaCore" | "OilField" | "Space" | "Ocean"
+   * | "Rust" | "Forest" | "Radioactive" | "Swamp" | "Wasteland"
+   * | "RocketInterior" | "Metallic" | "Barren" | "Moo" | "IceCaves"
+   * | "CarrotQuarry" | "SugarWoods" | "PrehistoricGarden"
+   * | "PrehistoricRaptor" | "PrehistoricWetlands"`. `null` when the
+   * subworld path couldn't be resolved in the current settings.
+   */
+  zone_type: string | null;
   x: number;
   y: number;
   /** Flat polygon vertex array: `[x0, y0, x1, y1, ...]`. */
@@ -206,6 +230,21 @@ export interface EntitySpawn {
   x: number;
   /** `cell / width`. */
   y: number;
+  /**
+   * Connections bitmask preserved from the source
+   * `TemplatePrefab.connections`. Present only for template-placed
+   * conduit-aware buildings (LogicGate, LogicWire, etc.). Absent for
+   * ambient / terrain mob spawns and for prefabs that had no
+   * connections field in the YAML.
+   */
+  connections?: number;
+  /**
+   * Rotation / orientation preserved from
+   * `TemplatePrefab.rotationOrientation` — e.g. `"R90"`, `"R180"`,
+   * `"R270"`, `"FlipH"`. Present only for rotated template buildings
+   * (e.g. the R270 LiquidValve in `poi_old_pool`). Absent otherwise.
+   */
+  rotationOrientation?: string;
 }
 
 /**

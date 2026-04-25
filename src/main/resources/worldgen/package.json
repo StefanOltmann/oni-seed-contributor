@@ -2,11 +2,11 @@
   "name": "@tigin-backwards/oxygen-not-included-worldgen",
   "type": "module",
   "description": "WASM entry point for ONI worldgen",
-  "version": "1.0.0",
+  "version": "2.0.1",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tigin-backwards/help-i-want-to-customize-my-oxygen-not-included-worldgen.git"
+    "url": "https://github.com/tigin-backwards/help-i-want-to-customize-my-oxygen-not-included-worldgen"
   },
   "files": [
     "index.js",

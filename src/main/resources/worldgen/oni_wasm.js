@@ -1,6 +1,61 @@
 /* @ts-self-types="./oni_wasm.d.ts" */
 
 /**
+ * Bench harness — time just the Rust `generate_with_settings` call without
+ * the JSON-serialization overhead every production entry point pays.
+ *
+ * Gated behind `debug` so release WASM doesn't ship with it. Returns a
+ * small JSON blob containing per-phase wall-clock in ms so the bench
+ * script can separate cluster-gen time from
+ * `build_result` + `serde_json::to_string` cost.
+ * @param {number} seed
+ * @param {string} cluster_id
+ * @returns {string}
+ */
+export function bench_cluster_phases(seed, cluster_id) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(cluster_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.bench_cluster_phases(seed, ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Bench harness — returns the accumulated phase totals as JSON
+ * (`{"phase": {"ms": number, "calls": number}, ...}`) and clears the
+ * accumulator. Gated behind `debug`.
+ * @returns {string}
+ */
+export function bench_profile_dump() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.bench_profile_dump();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Bench harness — enable the fine-grained `oni_worldgen::profile`
+ * phase accumulator. Pair with `bench_profile_dump()` after running the
+ * measured work. Gated behind `debug`.
+ */
+export function bench_profile_enable() {
+    wasm.bench_profile_enable();
+}
+
+/**
  * Clear the cached cluster to free memory.
  *
  * Call this when the user navigates away from a map preview or when
@@ -8,6 +63,38 @@
  */
 export function clear_cluster_cache() {
     wasm.clear_cluster_cache();
+}
+
+/**
+ * Compute a `ClusterDigest` from a coordinate, returning JSON.
+ *
+ * This is the canonical Rust path for digest regeneration — calling
+ * this function from JS via wasm-pack ensures the digest comes from
+ * the SAME math the production WASM build uses, not from a separate
+ * native binary that might have different precision.
+ *
+ * `mode` must be either "templates" or "notemplates".
+ *
+ * On parse error returns a JSON object with an `error` field.
+ * @param {string} coordinate
+ * @param {string} mode
+ * @returns {string}
+ */
+export function compute_digest_from_coordinate(coordinate, mode) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(coordinate, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.compute_digest_from_coordinate(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
 }
 
 /**
@@ -70,6 +157,29 @@ export function generate_cluster_cells(seed, cluster_id) {
         const ptr0 = passStringToWasm0(cluster_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.generate_cluster_cells(seed, ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Generate a cluster and return the rendered SimCell grid for each world.
+ * Returns JSON with element_idx, mass_hex, temp_hex, disease_idx, disease_count arrays.
+ * This is the same data format as the C# snapshot for parity verification.
+ * @param {number} seed
+ * @param {string} cluster_id
+ * @returns {string}
+ */
+export function generate_cluster_rendered(seed, cluster_id) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(cluster_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.generate_cluster_rendered(seed, ptr0, len0);
         deferred2_0 = ret[0];
         deferred2_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
@@ -158,24 +268,104 @@ export function generate_layout_cells(seed, cluster_id) {
 /**
  * Generate a full map preview from a coordinate string.
  *
- * Returns a JSON `MapData` structure containing per-world element grids,
+ * Returns a `MapData` structure containing per-world element grids,
  * biome cell polygons, entity spawns, and starmap locations. Designed
  * for rendering a complete map preview in a web UI.
+ *
+ * **WASM path** (`#[cfg(target_arch = "wasm32")]`): returns a
+ * `JsValue` with per-cell grids as typed arrays (`Uint16Array`,
+ * `Float32Array`, etc.) for zero-JSON-parse delivery — ~35 ms
+ * faster than the JSON path and an order of magnitude lighter on
+ * the JS heap.
+ *
+ * **Native path**: returns a JSON string, for use by native
+ * benchmarks / PGO tooling that can't host `JsValue`.
+ * @param {string} coordinate
+ * @returns {any}
+ */
+export function generate_map_data(coordinate) {
+    const ptr0 = passStringToWasm0(coordinate, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.generate_map_data(ptr0, len0);
+    return ret;
+}
+
+/**
+ * Generate a cluster from coordinate and return per-world element grids.
+ * Used for parity verification against C# snapshots.
  * @param {string} coordinate
  * @returns {string}
  */
-export function generate_map_data(coordinate) {
+export function generate_rendered_from_coordinate(coordinate) {
     let deferred2_0;
     let deferred2_1;
     try {
         const ptr0 = passStringToWasm0(coordinate, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.generate_map_data(ptr0, len0);
+        const ret = wasm.generate_rendered_from_coordinate(ptr0, len0);
         deferred2_0 = ret[0];
         deferred2_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
     } finally {
         wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Generate a single SandstoneDefault world and return timing + cell count data.
+ * @param {number} seed
+ * @returns {string}
+ */
+export function generate_sandstone_default(seed) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.generate_sandstone_default(seed);
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Generate terrain cells for the starting world and return as JSON.
+ * Used to verify WASM vs native parity.
+ * @param {number} seed
+ * @param {string} cluster_id
+ * @returns {string}
+ */
+export function generate_terrain_cells(seed, cluster_id) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(cluster_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.generate_terrain_cells(seed, ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Generate a VanillaSandstoneCluster (8-world DLC cluster) and return timing + cell count data.
+ * @param {number} seed
+ * @returns {string}
+ */
+export function generate_vanilla_sandstone_cluster(seed) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.generate_vanilla_sandstone_cluster(seed);
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
 }
 
@@ -405,19 +595,124 @@ export function settle_cluster_advance(target_tick) {
     return v1;
 }
 
+/**
+ * JSON twin of `settle_cluster_advance` — same simulation work, same
+ * per-tick snapshot, but emits a JSON string so we can benchmark the
+ * format cost without the simulation cost dominating. Gated behind
+ * `debug` so release builds don't ship with it.
+ *
+ * The `sim.step` work is identical to the binary version; only the
+ * output formatter changes. Lets the bench isolate "is binary worth
+ * the maintenance?" for this specific entry point.
+ * @param {number} target_tick
+ * @returns {string}
+ */
+export function settle_cluster_advance_json(target_tick) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.settle_cluster_advance_json(target_tick);
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg_Error_83742b46f01ce22d: function(arg0, arg1) {
+            const ret = Error(getStringFromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_String_8564e559799eccda: function(arg0, arg1) {
+            const ret = String(arg1);
+            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
+        __wbg___wbindgen_is_string_7ef6b97b02428fae: function(arg0) {
+            const ret = typeof(arg0) === 'string';
+            return ret;
+        },
         __wbg___wbindgen_throw_6ddd609b62940d55: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
+        },
+        __wbg_get_3ef1eba1850ade27: function() { return handleError(function (arg0, arg1) {
+            const ret = Reflect.get(arg0, arg1);
+            return ret;
+        }, arguments); },
+        __wbg_get_a8ee5c45dabc1b3b: function(arg0, arg1) {
+            const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
+        __wbg_new_49d5571bd3f0c4d4: function() {
+            const ret = new Map();
+            return ret;
+        },
+        __wbg_new_a70fbab9066b301f: function() {
+            const ret = new Array();
+            return ret;
+        },
+        __wbg_new_ab79df5bd7c26067: function() {
+            const ret = new Object();
+            return ret;
+        },
+        __wbg_new_from_slice_22da9388ac046e50: function(arg0, arg1) {
+            const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_new_from_slice_c62f8165d6102476: function(arg0, arg1) {
+            const ret = new Int32Array(getArrayI32FromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_new_from_slice_dddccc7a7dc2cc04: function(arg0, arg1) {
+            const ret = new Uint16Array(getArrayU16FromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_new_from_slice_ff2c15e8e05ffdfc: function(arg0, arg1) {
+            const ret = new Float32Array(getArrayF32FromWasm0(arg0, arg1));
+            return ret;
         },
         __wbg_now_16f0c993d5dd6c27: function() {
             const ret = Date.now();
             return ret;
         },
-        __wbindgen_cast_0000000000000001: function(arg0, arg1) {
+        __wbg_set_282384002438957f: function(arg0, arg1, arg2) {
+            arg0[arg1 >>> 0] = arg2;
+        },
+        __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
+            arg0[arg1] = arg2;
+        },
+        __wbg_set_7eaa4f96924fd6b3: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(arg0, arg1, arg2);
+            return ret;
+        }, arguments); },
+        __wbg_set_bf7251625df30a02: function(arg0, arg1, arg2) {
+            const ret = arg0.set(arg1, arg2);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000001: function(arg0) {
+            // Cast intrinsic for `F64 -> Externref`.
+            const ret = arg0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000002: function(arg0) {
+            // Cast intrinsic for `I64 -> Externref`.
+            const ret = arg0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000003: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000004: function(arg0) {
+            // Cast intrinsic for `U64 -> Externref`.
+            const ret = BigInt.asUintN(64, arg0);
             return ret;
         },
         __wbindgen_init_externref_table: function() {
@@ -436,14 +731,67 @@ function __wbg_get_imports() {
     };
 }
 
+function addToExternrefTable0(obj) {
+    const idx = wasm.__externref_table_alloc();
+    wasm.__wbindgen_externrefs.set(idx, obj);
+    return idx;
+}
+
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayI32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getInt32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayU16FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint16ArrayMemory0().subarray(ptr / 2, ptr / 2 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
+}
+
+let cachedFloat32ArrayMemory0 = null;
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
+}
+
+let cachedInt32ArrayMemory0 = null;
+function getInt32ArrayMemory0() {
+    if (cachedInt32ArrayMemory0 === null || cachedInt32ArrayMemory0.byteLength === 0) {
+        cachedInt32ArrayMemory0 = new Int32Array(wasm.memory.buffer);
+    }
+    return cachedInt32ArrayMemory0;
+}
+
 function getStringFromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return decodeText(ptr, len);
+}
+
+let cachedUint16ArrayMemory0 = null;
+function getUint16ArrayMemory0() {
+    if (cachedUint16ArrayMemory0 === null || cachedUint16ArrayMemory0.byteLength === 0) {
+        cachedUint16ArrayMemory0 = new Uint16Array(wasm.memory.buffer);
+    }
+    return cachedUint16ArrayMemory0;
 }
 
 let cachedUint8ArrayMemory0 = null;
@@ -452,6 +800,15 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function handleError(f, args) {
+    try {
+        return f.apply(this, args);
+    } catch (e) {
+        const idx = addToExternrefTable0(e);
+        wasm.__wbindgen_exn_store(idx);
+    }
 }
 
 function passStringToWasm0(arg, malloc, realloc) {
@@ -530,6 +887,10 @@ let wasmModule, wasm;
 function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
+    cachedDataViewMemory0 = null;
+    cachedFloat32ArrayMemory0 = null;
+    cachedInt32ArrayMemory0 = null;
+    cachedUint16ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

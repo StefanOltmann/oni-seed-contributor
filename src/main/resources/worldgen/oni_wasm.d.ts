@@ -2,12 +2,51 @@
 /* eslint-disable */
 
 /**
+ * Bench harness — time just the Rust `generate_with_settings` call without
+ * the JSON-serialization overhead every production entry point pays.
+ *
+ * Gated behind `debug` so release WASM doesn't ship with it. Returns a
+ * small JSON blob containing per-phase wall-clock in ms so the bench
+ * script can separate cluster-gen time from
+ * `build_result` + `serde_json::to_string` cost.
+ */
+export function bench_cluster_phases(seed: number, cluster_id: string): string;
+
+/**
+ * Bench harness — returns the accumulated phase totals as JSON
+ * (`{"phase": {"ms": number, "calls": number}, ...}`) and clears the
+ * accumulator. Gated behind `debug`.
+ */
+export function bench_profile_dump(): string;
+
+/**
+ * Bench harness — enable the fine-grained `oni_worldgen::profile`
+ * phase accumulator. Pair with `bench_profile_dump()` after running the
+ * measured work. Gated behind `debug`.
+ */
+export function bench_profile_enable(): void;
+
+/**
  * Clear the cached cluster to free memory.
  *
  * Call this when the user navigates away from a map preview or when
  * the settle result has been consumed and is no longer needed.
  */
 export function clear_cluster_cache(): void;
+
+/**
+ * Compute a `ClusterDigest` from a coordinate, returning JSON.
+ *
+ * This is the canonical Rust path for digest regeneration — calling
+ * this function from JS via wasm-pack ensures the digest comes from
+ * the SAME math the production WASM build uses, not from a separate
+ * native binary that might have different precision.
+ *
+ * `mode` must be either "templates" or "notemplates".
+ *
+ * On parse error returns a JSON object with an `error` field.
+ */
+export function compute_digest_from_coordinate(coordinate: string, mode: string): string;
 
 /**
  * Returns the build identifier this WASM was compiled against.
@@ -32,6 +71,13 @@ export function generate_cluster(seed: number, cluster_id: string): string;
  * Returns JSON: `{ "cluster_id", "seed", "worlds": [{ "name", "width", "height", "is_starting", "cells": [...] }] }`
  */
 export function generate_cluster_cells(seed: number, cluster_id: string): string;
+
+/**
+ * Generate a cluster and return the rendered SimCell grid for each world.
+ * Returns JSON with element_idx, mass_hex, temp_hex, disease_idx, disease_count arrays.
+ * This is the same data format as the C# snapshot for parity verification.
+ */
+export function generate_cluster_rendered(seed: number, cluster_id: string): string;
 
 /**
  * Generate a cluster with provided cluster YAML config override.
@@ -60,11 +106,42 @@ export function generate_layout_cells(seed: number, cluster_id: string): string;
 /**
  * Generate a full map preview from a coordinate string.
  *
- * Returns a JSON `MapData` structure containing per-world element grids,
+ * Returns a `MapData` structure containing per-world element grids,
  * biome cell polygons, entity spawns, and starmap locations. Designed
  * for rendering a complete map preview in a web UI.
+ *
+ * **WASM path** (`#[cfg(target_arch = "wasm32")]`): returns a
+ * `JsValue` with per-cell grids as typed arrays (`Uint16Array`,
+ * `Float32Array`, etc.) for zero-JSON-parse delivery — ~35 ms
+ * faster than the JSON path and an order of magnitude lighter on
+ * the JS heap.
+ *
+ * **Native path**: returns a JSON string, for use by native
+ * benchmarks / PGO tooling that can't host `JsValue`.
  */
-export function generate_map_data(coordinate: string): string;
+export function generate_map_data(coordinate: string): any;
+
+/**
+ * Generate a cluster from coordinate and return per-world element grids.
+ * Used for parity verification against C# snapshots.
+ */
+export function generate_rendered_from_coordinate(coordinate: string): string;
+
+/**
+ * Generate a single SandstoneDefault world and return timing + cell count data.
+ */
+export function generate_sandstone_default(seed: number): string;
+
+/**
+ * Generate terrain cells for the starting world and return as JSON.
+ * Used to verify WASM vs native parity.
+ */
+export function generate_terrain_cells(seed: number, cluster_id: string): string;
+
+/**
+ * Generate a VanillaSandstoneCluster (8-world DLC cluster) and return timing + cell count data.
+ */
+export function generate_vanilla_sandstone_cluster(seed: number): string;
 
 /**
  * Re-run ambient mob spawning against the cached cluster's current
@@ -190,18 +267,38 @@ export function settings_reset(): void;
  */
 export function settle_cluster_advance(target_tick: number): Uint8Array;
 
+/**
+ * JSON twin of `settle_cluster_advance` — same simulation work, same
+ * per-tick snapshot, but emits a JSON string so we can benchmark the
+ * format cost without the simulation cost dominating. Gated behind
+ * `debug` so release builds don't ship with it.
+ *
+ * The `sim.step` work is identical to the binary version; only the
+ * output formatter changes. Lets the bench isolate "is binary worth
+ * the maintenance?" for this specific entry point.
+ */
+export function settle_cluster_advance_json(target_tick: number): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly bench_cluster_phases: (a: number, b: number, c: number) => [number, number];
+    readonly bench_profile_dump: () => [number, number];
     readonly clear_cluster_cache: () => void;
+    readonly compute_digest_from_coordinate: (a: number, b: number, c: number, d: number) => [number, number];
     readonly game_version: () => [number, number];
     readonly generate_cluster: (a: number, b: number, c: number) => [number, number];
     readonly generate_cluster_cells: (a: number, b: number, c: number) => [number, number];
+    readonly generate_cluster_rendered: (a: number, b: number, c: number) => [number, number];
     readonly generate_cluster_with_configs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly generate_from_coordinate: (a: number, b: number) => [number, number];
     readonly generate_layout_cells: (a: number, b: number, c: number) => [number, number];
-    readonly generate_map_data: (a: number, b: number) => [number, number];
+    readonly generate_map_data: (a: number, b: number) => any;
+    readonly generate_rendered_from_coordinate: (a: number, b: number) => [number, number];
+    readonly generate_sandstone_default: (a: number) => [number, number];
+    readonly generate_terrain_cells: (a: number, b: number, c: number) => [number, number];
+    readonly generate_vanilla_sandstone_cluster: (a: number) => [number, number];
     readonly get_entity_spawners: () => [number, number];
     readonly set_skip_templates: (a: number) => void;
     readonly settings_export_bundle: () => [number, number, number, number];
@@ -212,10 +309,14 @@ export interface InitOutput {
     readonly settings_load_worldgen: (a: number, b: number) => [number, number];
     readonly settings_reset: () => void;
     readonly settle_cluster_advance: (a: number) => [number, number];
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly settle_cluster_advance_json: (a: number) => [number, number];
+    readonly bench_profile_enable: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __externref_table_alloc: () => number;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }

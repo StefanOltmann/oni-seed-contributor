@@ -74,7 +74,9 @@ function decodeSnapshot(buf) {
 // `generate(coord)` first to populate it.
 export const worldgen = {
   generate(coord) {
-    return JSON.parse(_wasm.generate_map_data(coord));
+    // Typed-array transport: per-cell grids arrive as Uint16Array /
+    // Float32Array / Uint8Array / Int32Array — no JSON.parse.
+    return _wasm.generate_map_data(coord);
   },
   advance(tick) {
     return decodeSnapshot(_wasm.settle_cluster_advance(tick));

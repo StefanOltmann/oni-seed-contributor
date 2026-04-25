@@ -226,7 +226,7 @@ throws.
 
 Full TypeScript types for the bundles and their inner shapes
 (`WorldgenBundle`, `LookupsBundle`, `FullBundle`, `World`,
-`SubWorld`, `BiomeSettings`, `NoiseTree`, `WorldTrait`,
+`Subworld`, `BiomeSettings`, `NoiseTree`, `WorldTrait`,
 `FeatureSettings`, `MobConfig`, `RoomConfig`, `TemplateContainer`,
 and the primitives they compose) ship with the package `.d.ts`.
 Import them by name.
@@ -297,6 +297,7 @@ interface MapData {
   coordinate: string;
   seed: number;
   cluster_id: string;
+  coordinate_prefix: string;          // short tag e.g. "SNDST-C", "V-BAD-C", "VOLCA"
   element_table: string[];            // element names indexed by element_idx
   starmap: StarmapEntry[];            // Spaced Out hex grid world locations
   starmap_pois: StarmapPoi[];         // Spaced Out non-asteroid hex POIs
@@ -323,11 +324,11 @@ interface WorldMapData {
   height: number;
   is_starting: boolean;
   world_traits: string[];
-  element_idx: number[];              // u16 per cell, row-major (width * height)
-  mass: number[];                     // f32 per cell
-  temperature: number[];              // f32 per cell
-  disease_idx: number[];              // u8 per cell, 255 = none
-  disease_count: number[];            // i32 per cell
+  element_idx: Uint16Array;           // u16 per cell, row-major (width * height)
+  mass: Float32Array;                 // f32 per cell
+  temperature: Float32Array;          // f32 per cell
+  disease_idx: Uint8Array;            // u8 per cell, 255 = none
+  disease_count: Int32Array;          // i32 per cell
   biome_cells: BiomeCell[];
   geysers: GeyserSpawn[];
   buildings: EntitySpawn[];
@@ -338,6 +339,7 @@ interface WorldMapData {
 interface BiomeCell {
   id: number;
   type: string;                       // subworld type path
+  zone_type: string | null;           // ZoneType enum: "ToxicJungle", "Sandstone", "FrozenWastes", etc.
   x: number;
   y: number;
   poly: number[];                     // flat [x0,y0,x1,y1,...]
@@ -348,6 +350,8 @@ interface EntitySpawn {
   cell: number;                       // grid cell index
   x: number;                          // cell % width
   y: number;                          // cell / width
+  connections?: number;               // TemplatePrefab.connections bitmask (conduit-aware buildings only)
+  rotationOrientation?: string;       // TemplatePrefab.rotationOrientation, e.g. "R90", "R270", "FlipH"
 }
 
 interface GeyserSpawn extends EntitySpawn {
@@ -416,9 +420,9 @@ option (`MUWF1`) enabled. 8 worlds, ~170,000 cells total.
 | Runtime | Time |
 |---|---|
 | In-game World Generation | 10.4 s |
-| This package (Node 24) | 0.58 s |
+| This package (Node 24) | 0.48 s |
 
-WASM worldgen runs roughly 18x faster than the game's C# worldgen.
+WASM worldgen runs roughly 22x faster than the game's C# worldgen.
 
 **Memory usage** (one worldgen at a time, measured on the same
 cluster, resident memory only):
@@ -430,7 +434,7 @@ cluster, resident memory only):
 
 WASM worldgen uses roughly 15x less memory than the game's C# worldgen.
 
-Package size: 1.4 MB gzipped, 9.5 MB uncompressed (the WASM module
+Package size: 1.3 MB gzipped, 9.0 MB uncompressed (the WASM module
 is nearly all of it). Load it in a web worker so the download and
 instantiate don't block the main thread.
 

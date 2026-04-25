@@ -50,7 +50,7 @@ export interface WorldgenBundle {
    * Subworld (biome/zone) definitions keyed by config path.
    * Worlds reference these by name via `subworldFiles`.
    */
-  subworlds: Record<string, SubWorld>;
+  subworlds: Record<string, Subworld>;
   /**
    * Cluster layouts keyed by config path (e.g.
    * `"expansion1::clusters/VanillaSandstoneCluster"`). Defines which
@@ -382,7 +382,7 @@ export interface ModifyLayoutTagsRule {
 /**
  * A template-spawn rule — "place one of these templates at an
  * overworld cell satisfying this filter". Collected on `World` or
- * `SubWorld` and evaluated in priority order.
+ * `Subworld` and evaluated in priority order.
  */
 export interface TemplateSpawnRules {
   /**
@@ -492,7 +492,7 @@ export interface World {
   /**
    * Weighted list of subworld config paths this world is built from.
    * Each subworld gets dropped into the layout according to its
-   * weight; counts are driven by `SubWorld.density`.
+   * weight; counts are driven by `Subworld.density`.
    */
   subworldFiles?: WeightedSubworldName[];
   /**
@@ -578,7 +578,7 @@ export interface WeightedSubworldName {
 
 /**
  * Point-sampling layer used for additional mob/room sample point
- * generation within a SubWorld. Each subworld can stack multiple
+ * generation within a Subworld. Each subworld can stack multiple
  * samplers (e.g. one for Hatches, another for sweetle nests).
  */
 export interface Sampler {
@@ -596,13 +596,13 @@ export interface Sampler {
 }
 
 /**
- * A biome/zone definition (ProcGen.SubWorld). Subworlds are the
+ * A biome/zone definition (ProcGen.Subworld). Subworlds are the
  * building blocks of a world's Voronoi layout — each cell in the
  * overworld is assigned a subworld, and the subworld drives the
  * cell's temperature, elemental banding, feature pool, and
  * template rules.
  */
-export interface SubWorld {
+export interface Subworld {
   /** Internal identifier (often null for subworlds loaded by path). */
   name?: string | null;
   /** Loc-key for display name. */
@@ -667,7 +667,7 @@ export interface SubWorld {
   minEnergy?: number;
   /** Template-spawn rules scoped to this subworld's cells. */
   subworldTemplateRules?: TemplateSpawnRules[] | null;
-  /** Catch-all for SubWorld fields not enumerated above. */
+  /** Catch-all for Subworld fields not enumerated above. */
   [key: string]: unknown;
 }
 
@@ -708,7 +708,7 @@ export interface CountRange {
 }
 
 /**
- * Weighted biome entry in `SubWorld.biomes`. The worldgen picks
+ * Weighted biome entry in `Subworld.biomes`. The worldgen picks
  * one biome per subworld-cell weighted by these entries.
  */
 export interface WeightedBiome {
