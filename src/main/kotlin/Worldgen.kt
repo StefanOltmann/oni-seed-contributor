@@ -1,5 +1,8 @@
+package de.stefanoltmann.onised.contributor
+
 import com.caoccao.javet.interop.NodeRuntime
 import com.caoccao.javet.interop.V8Host
+import com.caoccao.javet.values.reference.V8ValueGlobalObject
 
 object Worldgen {
 
@@ -8,12 +11,15 @@ object Worldgen {
     init {
         nodeRuntime = V8Host.getNodeInstance().createV8Runtime()
 
+        val globalObject: V8ValueGlobalObject = nodeRuntime.globalObject
+
+        val wasmBytes = Thread.currentThread().contextClassLoader
+            .getResourceAsStream("worldgen/oni_wasm_bg.wasm")!!
+            .readAllBytes()
+
+        globalObject.set("wasmBytes", wasmBytes)
+
         nodeRuntime.getExecutor(
-            "const fs = require('fs');" +
-            "const path = require('path');" +
-            "const resourceUrl = com.caoccao.javet.utils.ResourceLoader.getResourceURL('worldgen/oni_wasm_bg.wasm');" +
-            "const wasmPath = resourceUrl.path ? resourceUrl.path.replace(/^\\//, '') : resourceUrl.toString();" +
-            "const wasmBytes = fs.readFileSync(wasmPath);" +
             "let cachedUint8ArrayMemory0 = null;" +
             "function getUint8ArrayMemory0() {" +
             "    if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {" +
@@ -74,13 +80,6 @@ object Worldgen {
             "    };" +
             "    return { './oni_wasm_bg.js': import0 };" +
             "}" +
-            "async function __wbg_load(module, imports) {" +
-            "    let instance, module_obj;" +
-            "    instance = await WebAssembly.instantiate(module, imports);" +
-            "    if (instance instanceof WebAssembly.Instance) { module_obj = { instance, module: module }; }" +
-            "    else { module_obj = instance; }" +
-            "    return module_obj;" +
-            "}" +
             "function __wbg_finalize_init(instance, module) {" +
             "    wasm = instance.exports;" +
             "    wasmModule = module;" +
@@ -88,33 +87,36 @@ object Worldgen {
             "    wasm.__wbindgen_start();" +
             "    return wasm;" +
             "}" +
-            "async function init() {" +
-            "    if (wasm !== undefined) return wasm;" +
+            "(function() {" +
+            "    const wasmByteArray = wasmBytes;" +
             "    const imports = __wbg_get_imports();" +
-            "    const { instance, module } = await __wbg_load(wasmBytes, imports);" +
-            "    return __wbg_finalize_init(instance, module);" +
-            "}" +
-            "globalThis.initPromise = init().then(() => {" +
-            "    globalThis.worldgen = {" +
-            "        generate: function(coord) {" +
-            "            let deferred2_0, deferred2_1;" +
-            "            try {" +
-            "                const ptr0 = passStringToWasm0(coord, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);" +
-            "                const len0 = WASM_VECTOR_LEN;" +
-            "                const ret = wasm.generate_map_data(ptr0, len0);" +
-            "                deferred2_0 = ret[0]; deferred2_1 = ret[1];" +
-            "                return getStringFromWasm0(ret[0], ret[1]);" +
-            "            } finally {" +
-            "                if (deferred2_0) wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);" +
-            "            }" +
+            "    const result = WebAssembly.instantiate(wasmByteArray.buffer, imports);" +
+            "    if (result instanceof WebAssembly.Instance) {" +
+            "        __wbg_finalize_init(result, undefined);" +
+            "    } else {" +
+            "        result.then(function(res) { __wbg_finalize_init(res.instance, res.module); });" +
+            "    }" +
+            "})();" +
+            "globalThis.worldgen = {" +
+            "    generate: function(coord) {" +
+            "        let deferred2_0, deferred2_1;" +
+            "        try {" +
+            "            const ptr0 = passStringToWasm0(coord, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);" +
+            "            const len0 = WASM_VECTOR_LEN;" +
+            "            const ret = wasm.generate_map_data(ptr0, len0);" +
+            "            deferred2_0 = ret[0]; deferred2_1 = ret[1];" +
+            "            return getStringFromWasm0(ret[0], ret[1]);" +
+            "        } finally {" +
+            "            if (deferred2_0) wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);" +
             "        }" +
-            "    };" +
-            "});"
+            "    }" +
+            "};"
         ).executeVoid()
+
+        nodeRuntime.await()
     }
 
     fun generate(coordinate: String): String {
-        nodeRuntime.getExecutor("await initPromise").executeVoid()
         val result = nodeRuntime.getExecutor("JSON.stringify(worldgen.generate('$coordinate'))").executeString()
         return result
     }
