@@ -1,5 +1,3 @@
-package de.stefanoltmann.onised.contributor
-
 import com.caoccao.javet.interop.NodeRuntime
 import com.caoccao.javet.interop.V8Host
 import com.caoccao.javet.values.reference.V8ValueGlobalObject
