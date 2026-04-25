@@ -22,7 +22,7 @@ import io.ktor.server.netty.Netty
 
 fun main() {
 
-    val json = Worldgen.generate("M-CERS-C-1832718697-0-0-0")
+    val json = Worldgen.generate("PRE-C-719330309-0-0-ZB937")
 
     println(json)
 
