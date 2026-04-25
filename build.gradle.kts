@@ -63,8 +63,8 @@ dependencies {
 
     implementation(libs.oniSeedBrowserModel)
 
-    implementation("com.caoccao.javet:javet:5.0.6")
-    implementation("com.caoccao.javet:javet-node-windows-x86_64:5.0.6")
+    implementation(libs.javet.core)
+    implementation(libs.javet.windows)
 
     /*
      * Unit tests

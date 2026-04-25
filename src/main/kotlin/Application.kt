@@ -21,6 +21,10 @@ import io.ktor.server.netty.Netty
 
 fun main() {
 
+    val json = Worldgen.generate("M-CERS-C-1832718697-0-0-0")
+
+    println(json)
+
     embeddedServer(
         factory = Netty,
         port = 8080,

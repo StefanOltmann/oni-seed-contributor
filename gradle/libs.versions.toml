@@ -3,6 +3,7 @@ kotlin = "2.3.20"
 ktor = "3.4.2"
 git-versioning = "6.4.4"
 logback = "1.4.14"
+javet = "5.0.6"
 oniSeedBrowserModel = "cc174d2"
 
 [libraries]
@@ -21,6 +22,10 @@ logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "lo
 
 # Ktor Client
 ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
+
+# Javet (Node.js/V8 integration)
+javet-core = { module = "com.caoccao.javet:javet", version.ref = "javet" }
+javet-windows = { module = "com.caoccao.javet:javet-node-windows-x86_64", version.ref = "javet" }
 
 # Test libraries
 kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
