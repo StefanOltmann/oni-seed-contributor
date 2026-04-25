@@ -21,6 +21,7 @@ object Worldgen {
     fun generate(coordinate: String): String {
 
         // TODO Call the WASM worldgen service here.
+        //  src/main/resources/worldgen/oni_wasm_bg.wasm
 
         return ""
     }

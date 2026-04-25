@@ -4,7 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ktor)
     alias(libs.plugins.git.versioning)
-    id("io.github.charlietap.chasm.gradle") version "2.0.1-1.4.3"
+    // id("io.github.charlietap.chasm.gradle") version "2.0.1-1.4.3"
 }
 
 group = "de.stefan-oltmann"
@@ -28,14 +28,14 @@ kotlin {
     jvmToolchain(jdkVersion = 25)
 }
 
-chasm {
-    modules {
-        create("WorldgenService") {
-            binary = layout.projectDirectory.file("src/main/resources/worldgen/oni_wasm_bg.wasm")
-            packageName = "com.onimaxxing"
-        }
-    }
-}
+//chasm {
+//    modules {
+//        create("WorldgenService") {
+//            binary = layout.projectDirectory.file("src/main/resources/worldgen/oni_wasm_bg.wasm")
+//            packageName = "com.onimaxxing"
+//        }
+//    }
+//}
 
 application {
 
