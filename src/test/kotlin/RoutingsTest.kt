@@ -82,4 +82,29 @@ class RoutingsTest {
         assertEquals(HttpStatusCode.OK, response.status)
         assertTrue(response.bodyAsText().startsWith("ONI seed contributor"))
     }
+
+    @Test
+    fun `500 on unexpected throwable does not leak the message`() = testApplication {
+        // Anything that's not a WorldgenError + not a JavetException
+        // falls through to the catch-all branch in respondWorldgenError.
+        // The branch must NOT echo e.message (could leak file paths,
+        // internal class names) — it should respond with a generic
+        // string and log the real detail to stderr.
+        val sensitive = "/etc/secret-config password=hunter2"
+        val service = WorldgenService(
+            generator = { throw IllegalStateException(sensitive) },
+            timeout = 5.seconds,
+        )
+        application { configureRouting(service) }
+
+        val response = client.get("/generate/$VALID")
+        assertEquals(HttpStatusCode.InternalServerError, response.status)
+        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("UNEXPECTED", body["code"]!!.jsonPrimitive.content)
+        val clientMessage = body["message"]!!.jsonPrimitive.content
+        assertTrue(
+            !clientMessage.contains("secret-config") && !clientMessage.contains("hunter2"),
+            "client-facing message must not echo the underlying exception detail; got: $clientMessage"
+        )
+    }
 }

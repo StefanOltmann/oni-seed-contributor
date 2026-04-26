@@ -62,6 +62,17 @@ class WorldgenService(
             Result.failure(WorldgenError.Timeout(coord, timeout))
         } catch (e: JavetException) {
             Result.failure(WorldgenError.WasmFailure(coord, e.message))
+        } catch (e: Throwable) {
+            // Catch-all so generate() upholds the "never throws, always
+            // returns Result" contract. The route's respondWorldgenError
+            // maps non-WorldgenError throwables to 500/UNEXPECTED with a
+            // generic body and logs the real detail to stderr.
+            //
+            // Catches Throwable (not just Exception) so Errors like
+            // OutOfMemoryError become a 500 instead of crashing the
+            // request thread silently — they're propagated via Result
+            // not swallowed; the orchestrator will see them in stderr.
+            Result.failure(e)
         }
     }
 }
@@ -74,7 +85,14 @@ class WorldgenService(
  * CPU and unjams the mutex. Tests inject a no-op (`onTimeout = { _ -> }`)
  * so the test JVM survives.
  */
+// Idempotent: the first timeout schedules termination; any further
+// timeouts in the ~2s window before exitProcess fires are no-ops, so
+// we don't spawn duplicate "worldgen-self-termination" threads or emit
+// duplicate FATAL log lines for what is logically one shutdown.
+private val terminationScheduled = java.util.concurrent.atomic.AtomicBoolean(false)
+
 private fun scheduleSelfTermination(coord: String) {
+    if (!terminationScheduled.compareAndSet(false, true)) return
     Thread {
         // 2s safety margin. The 504 is typically on the wire in <50 ms
         // (Ktor's Netty backend writes synchronously inside `call.respond`),
