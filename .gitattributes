@@ -1,0 +1,4 @@
+# The WASM produces LF-terminated JSON; pinning eol=lf keeps the
+# WorldgenRuntimeTest sample comparison reproducible on Windows
+# checkouts where autocrlf would otherwise rewrite the file to CRLF.
+src/test/resources/sample.json text eol=lf
