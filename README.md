@@ -6,33 +6,30 @@
 ![WASM](https://img.shields.io/badge/-WASM-gray.svg?style=flat)
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-gray?&logo=GitHub-Sponsors&logoColor=EA4AAA)](https://github.com/sponsors/StefanOltmann)
 
-Docker-based service that runs the [onimaxxing](https://onimaxxing.com)
-worldgen WASM module on the JVM, exposing it over HTTP. Server-side
-companion to the in-browser worldgen in
-[oni-seed-browser](https://github.com/StefanOltmann/oni-seed-browser).
-
-## API
-
-```
-GET /                       → version banner
-GET /generate/{coord}       → trimmed worldgen JSON (200) or {code,message,coordinate} error body
-```
-
-Errors:
-
-| HTTP | `code`               | when |
-|------|----------------------|------|
-| 400  | `INVALID_COORDINATE` | coordinate fails the `oni-seed-browser-model` regex |
-| 502  | `WASM_FAILURE`       | Rust panic, JS throw, or WASM-rejected coordinate |
-| 504  | `TIMEOUT`            | `WORLDGEN_TIMEOUT_SECONDS` exceeded — *the process exits 70 a moment after the 504 is sent; orchestrator restarts it* |
-| 500  | `UNEXPECTED`         | unanticipated bug; full stack on stderr, generic message to client |
+Headless ONI seed contributor — runs the
+[onimaxxing](https://onimaxxing.com) worldgen WASM module on the JVM,
+mints random coordinates, generates clusters, and uploads them to the
+[oni-seed-browser-backend](https://github.com/StefanOltmann/oni-seed-browser-backend).
+The server-side equivalent of leaving the
+[oni-seed-browser](https://github.com/StefanOltmann/oni-seed-browser)
+contribute view open in a desktop tab.
 
 ## Run via Docker
 
 ```bash
-docker run --rm -p 8080:8080 ghcr.io/stefanoltmann/oni-seed-contributor:latest
-curl http://localhost:8080/generate/LUSH-A-867734350-0-0-0
+docker run --rm -p 8080:8080 \
+  -e STEAM_AUTH_TOKEN=eyJ... \
+  -v oni-contributor-data:/data \
+  ghcr.io/stefanoltmann/oni-seed-contributor:latest
 ```
+
+The container auto-starts the contributor loop at boot. Mount a
+persistent volume at `/data` so the per-installation UUID is the same
+across restarts (matches the browser's `installationId` semantics).
+
+The official image bakes `MNI_API_KEY_BROWSER` in at build time. If you
+build your own image and don't bake it in, pass it explicitly via
+`-e MNI_API_KEY_BROWSER=...`; the service refuses to start without it.
 
 A 1 GB memory limit is comfortable; the V8 + WASM heap typically sits
 ~150 MB at idle and grows to 300–500 MB under load.
@@ -45,6 +42,7 @@ Docker buildx is required for native multi-arch images:
 docker buildx create --use --name oni-seed-contributor-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg MNI_API_KEY_BROWSER=$MNI_API_KEY_BROWSER \
   -t your-registry/oni-seed-contributor:latest --push .
 ```
 
@@ -59,7 +57,11 @@ Notes:
 Requirements: a JDK supported by foojay (Gradle auto-downloads JDK 25 on first build).
 
 ```bash
-./gradlew run                                # boots on :8080
+export STEAM_AUTH_TOKEN=eyJ...
+export MNI_API_KEY_BROWSER=...
+export INSTALLATION_ID_PATH=/tmp/oni-contributor-installation-id
+export AUTO_START=false
+./gradlew run                                  # boots on :8080
 curl http://localhost:8080/generate/LUSH-A-867734350-0-0-0
 ```
 
@@ -67,70 +69,75 @@ Cold start is ~1–3 s while V8 boots and the WASM is instantiated.
 First request after cold start sees that latency; subsequent requests
 hit the cached runtime.
 
-## Configuration
+## API
 
-Two environment variables, both optional:
+```
+GET /                       → version banner
+GET /generate/{coord}       → generated Cluster as JSON (debug-only; runs WASM, returns the parsed Cluster)
+GET /status                 → current ContributorService state (running, counters, lastError, …)
+GET /start                  → start the contributor loop  (header `API_KEY: $CONTROL_API_KEY` required)
+GET /stop                   → stop the contributor loop   (header `API_KEY: $CONTROL_API_KEY` required)
+```
+
+`/start` and `/stop` return `403 Forbidden` if `CONTROL_API_KEY` is
+unset (the default) and `401 Unauthorized` on header mismatch.
+
+## Configuration
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WORLDGEN_PORT` | `8080` | HTTP listen port |
-| `WORLDGEN_TIMEOUT_SECONDS` | `30` | per-request wall-clock; on timeout the process exits with code 70 (see *Failure & restart*) |
+| `STEAM_AUTH_TOKEN` | *(required)* | The MNI/Steam JWT — copy it from the oni-seed-browser frontend's auth flow. Service refuses to start if the token is missing, malformed, missing the `sub`/`steamId` claim, or already past `exp`. |
+| `MNI_API_KEY_BROWSER` | *(required)* | Backend API key. Baked into the official Docker image; pass via `-e` if you build your own. |
+| `SERVER_URL` | `https://mni.stefan-oltmann.de` | Backend root; appends `/upload`. Override only if you're running your own backend. |
+| `INSTALLATION_ID_PATH` | `/data/installation_id` | Where the per-install UUID is read/written. Mount a volume covering this path to persist across restarts. |
+| `AUTO_START` | `true` | Set to `false` to keep the loop idle at boot — start it later via `GET /start`. |
+| `CONTROL_API_KEY` | *(unset)* | When set, `/start` and `/stop` require `API_KEY: <this>` header. When unset, both endpoints return 403. |
+| `WORLDGEN_PORT` | `8080` | HTTP listen port. |
 
-## Failure & restart
+## Throttling & error handling
 
-The WASM call cannot be cancelled in-process — Javet's
-`terminateExecution()` doesn't reach code executing inside the WASM
-compartment, so a runaway coordinate can't be aborted. To prevent one
-slow seed from permanently blocking the runtime mutex, on timeout the
-service:
+The contributor loop mirrors `oni-seed-browser`'s `MapGenerationView`:
 
-1. Returns the `TIMEOUT` 504 to the requesting client.
-2. Schedules a non-daemon thread that sleeps ~2 s (so the response
-   flushes), then calls `exitProcess(70)` (`70 == EX_SOFTWARE`).
-3. Container orchestrator (Docker `restart: on-failure`, k8s
-   `restartPolicy: Always`) brings the container back. ~1–3 s cold
-   start, then traffic resumes.
-
-Document this when deploying — the operator should expect occasional
-restarts on bad coordinates rather than treat them as crashes.
-
-The full reasoning is in [`docs/DESIGN_DECISION_LOG.md`](docs/DESIGN_DECISION_LOG.md)
-DD-009 → DD-011.
+- After each successful upload: continue at the current delay (default 500 ms).
+- `409 Conflict` (coord already known): record + continue.
+- `429 Too Many Requests`: bump delay by 100 ms, pause 1 s, retry. If the delay grows past 5 s, the loop stops itself; the operator can resume via `GET /start`.
+- Any other non-2xx or network failure: wait 30 s, then continue.
 
 ## Tests
 
 ```bash
-./gradlew test                               # 13 tests (5 service + 5 route + 3 V8/WASM)
-SKIP_WASM_TESTS=1 ./gradlew test             # 10 tests (skips the V8 integration path)
+./gradlew test                                # 11 tests (1 V8/WASM, 4 service, 6 JWT)
 ```
 
-Set `SKIP_WASM_TESTS=1` on platforms where the Javet native isn't
-available locally (Alpine without glibc, exotic architectures). CI
-runs the full suite as part of the Docker build stage.
+The V8/WASM integration test requires a Javet native for the host
+platform. CI runs the full suite as part of the Docker build stage on
+Linux x86_64 — that's the canonical environment.
 
 ## Architecture
 
-Three flat-file layers in `src/main/kotlin/`:
+Flat-file layers in `src/main/kotlin/`:
 
 ```
-Application.kt           composition root
-Routings.kt              GET /, GET /generate/{coord}, error→HTTP mapping
-WorldgenService.kt       sealed WorldgenError, validate/timeout/classify
-JavetWorldgenRuntime.kt  V8/Node + WASM lifecycle, mutex, JS strip
+Application.kt              composition root: parse token, build deps, auto-start
+Routings.kt                 GET /, /generate/{coord}, /status, /start, /stop
+ContributorService.kt       the work loop + state machine
+WorldgenRuntime.kt          V8/Node + WASM lifecycle, mutex, JS strip
+BackendClient.kt            ktor-client wrapper around POST /upload
+SteamAuthToken.kt           JWT parsing + minimal validation
+InstallationId.kt           load-or-create the persistent per-install UUID
+RandomCoordinate.kt         generateRandomCoordinate() port + WORLDGEN_GAME_VERSION
+WorldgenModels.kt           vendored from oni-seed-browser frontend
+WorldgenMapDataConverter.kt vendored from oni-seed-browser frontend
+UploadClusterConverter.kt   vendored from oni-seed-browser frontend
 ```
-
-The full design is in [`docs/DESIGN.md`](docs/DESIGN.md). Decision
-rationale (12 entries, "In the face of X, we elected Y, knowing Z"
-format) is in [`docs/DESIGN_DECISION_LOG.md`](docs/DESIGN_DECISION_LOG.md).
-The implementation plan that drove this build is in
-[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
 ## License & credits
 
 AGPL-3.0. The bundled WASM module
 (`src/main/resources/worldgen/`) is the upstream
 `@tigin-backwards/oxygen-not-included-worldgen` v2.0.1 npm package
-(MIT). The Kotlin types in `src/test/kotlin/WorldgenModels.kt` and
-`WorldgenMapDataConverter.kt` are vendored verbatim from the
+(MIT). The `WorldgenModels`, `WorldgenMapDataConverter`, and
+`UploadClusterConverter` Kotlin sources are vendored verbatim from the
 [oni-seed-browser](https://github.com/StefanOltmann/oni-seed-browser)
-frontend (commonMain) for round-trip parity testing.
+frontend. If they ever land in `oni-seed-browser-model`, the vendored
+copies should be deleted in favor of the dependency.
