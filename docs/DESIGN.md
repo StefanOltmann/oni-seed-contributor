@@ -1,7 +1,6 @@
-# WASM Bridge Design — ONI Seed Contributor
+# Design — ONI Seed Contributor (WASM Bridge)
 
-**Date:** 2026-04-26
-**Status:** Approved (revision 2)
+**Status:** Approved (revision 2, 2026-04-26)
 **Scope:** v1 of the Kotlin/JVM ↔ WASM worldgen bridge
 
 ## Context
