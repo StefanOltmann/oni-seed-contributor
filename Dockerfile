@@ -10,7 +10,7 @@ COPY src src
 RUN chmod +x gradlew
 RUN ./gradlew --no-daemon --info test buildFatJar
 
-FROM --platform=$TARGETPLATFORM eclipse-temurin:25-jre-alpine
+FROM --platform=$TARGETPLATFORM eclipse-temurin:25-jre
 EXPOSE 8080:8080
 RUN mkdir /app
 COPY --from=BUILD_STAGE /tmp/build/libs/*-all.jar /app/ktor-server.jar

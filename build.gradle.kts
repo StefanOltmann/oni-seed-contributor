@@ -35,13 +35,35 @@ application {
     applicationDefaultJvmArgs = listOf("-Dio.ktor.development=$isDevelopment")
 }
 
+// region Version
+// Generate a Version.kt with the git-derived project version. Wired as
+// a proper task (rather than the old afterEvaluate block) so that
+// `compileKotlin` automatically depends on it via srcDir(generateVersionKt).
+// This makes `./gradlew clean test` work — the previous version ran
+// generation at configuration time, and `clean` would delete the file
+// before `compileKotlin` ran.
+val generateVersionKt by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/source")
+    val versionString = providers.provider { project.version.toString() }
+    inputs.property("version", versionString)
+    outputs.dir(outputDir)
+    doLast {
+        val dir = outputDir.get().asFile
+        dir.mkdirs()
+        File(dir, "Version.kt").writeText(
+            "const val VERSION: String = \"${versionString.get()}\"\n"
+        )
+    }
+}
+
 sourceSets {
     main {
         kotlin {
-            srcDir(layout.buildDirectory.dir("generated/source"))
+            srcDir(generateVersionKt)
         }
     }
 }
+// endregion
 
 repositories {
     mavenCentral()
@@ -50,44 +72,31 @@ repositories {
 
 dependencies {
 
-    /*
-     * Ktor server
-     */
+    /* Ktor server */
     implementation(libs.bundles.ktor.server)
     implementation(libs.logback.classic)
 
-    /*
-     * Ktor client
-     */
+    /* Ktor client (kept for future contributor wiring) */
     implementation(libs.ktor.client.okhttp)
 
+    /* Coroutines */
+    implementation(libs.kotlinx.coroutines.core)
+
+    /* Domain model */
     implementation(libs.oniSeedBrowserModel)
 
+    /* Javet — core + per-platform natives.
+     * The Windows native is needed for local dev; the two Linux natives
+     * are needed for the Docker image (amd64 + arm64 from CI). All three
+     * are runtimeOnly so they don't appear on the compile classpath. */
     implementation(libs.javet.core)
-    implementation(libs.javet.windows)
+    runtimeOnly(libs.javet.windows)
+    runtimeOnly(libs.javet.linux.amd64)
+    runtimeOnly(libs.javet.linux.arm64)
 
-    /*
-     * Unit tests
-     */
+    /* Tests */
     testImplementation(libs.kotlin.test.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.ktor.server.test.host)
 }
 
-// region Version
-project.afterEvaluate {
-
-    logger.lifecycle("Generate Version.kt")
-
-    val outputDir = layout.buildDirectory.file("generated/source/").get().asFile
-
-    outputDir.mkdirs()
-
-    val file = File(outputDir.absolutePath, "Version.kt")
-
-    file.printWriter().use { writer ->
-
-        writer.println("const val VERSION: String = \"$version\"")
-
-        writer.flush()
-    }
-}
-// endregion

@@ -15,73 +15,90 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-import io.ktor.client.HttpClient
+import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
+import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
-import kotlinx.serialization.ExperimentalSerializationApi
-import kotlin.time.Clock
-import kotlin.time.ExperimentalTime
-import kotlin.uuid.ExperimentalUuidApi
+import kotlinx.serialization.Serializable
 
-private val httpClient = HttpClient()
+@Serializable
+data class ErrorBody(
+    val code: String,
+    val message: String,
+    val coordinate: String? = null,
+)
 
-@OptIn(ExperimentalSerializationApi::class)
-fun Application.configureRouting() {
+fun Application.configureRouting(service: WorldgenService) {
 
-    try {
+    println("[INIT] Starting Server at version $VERSION")
 
-        configureRoutingInternal()
+    install(ContentNegotiation) { json() }
 
-    } catch (ex: Throwable) {
-
-        log("Starting server $VERSION failed.")
-        log(ex)
-    }
-}
-
-@OptIn(ExperimentalSerializationApi::class, ExperimentalTime::class, ExperimentalUuidApi::class)
-private fun Application.configureRoutingInternal() {
-
-    val startTime = Clock.System.now().toEpochMilliseconds()
-
-    log("[INIT] Starting Server at version $VERSION")
-
-    /*
-     * Wildcard CORS
-     */
     install(CORS) {
-
         allowMethod(HttpMethod.Options)
         allowMethod(HttpMethod.Get)
-
-        allowHeader(HttpHeaders.AccessControlAllowOrigin)
+        // Access-Control-Allow-Origin is a *response* header set by the
+        // server; only request headers belong in allowHeader().
         allowHeader(HttpHeaders.ContentType)
-
         anyHost()
     }
 
     routing {
 
         get("/") {
+            call.respondText("ONI seed contributor $VERSION")
+        }
 
-            val uptimeMinutes = (Clock.System.now().toEpochMilliseconds() - startTime) / 1000 / 60
-
-            val uptimeHours = uptimeMinutes / 60
-            val minutes = uptimeMinutes % 60
-
-            call.respondText("ONI seed contributor $VERSION (up since $uptimeHours hours and $minutes minutes)")
+        get("/generate/{coord}") {
+            // Ktor guarantees {coord} is present (the route wouldn't match
+            // otherwise), so !! is safe.
+            val coord = call.parameters["coord"]!!
+            val started = System.currentTimeMillis()
+            service.generate(coord)
+                .onSuccess {
+                    call.respondText(it, ContentType.Application.Json)
+                    println("[OK] $coord (${System.currentTimeMillis() - started}ms)")
+                }
+                .onFailure { e ->
+                    respondWorldgenError(call, e)
+                    println("[${(e as? WorldgenError)?.code ?: "UNEXPECTED"}] $coord (${System.currentTimeMillis() - started}ms)")
+                }
         }
     }
 }
 
-private fun log(message: String) =
-    println(message)
-
-private fun log(ex: Throwable) =
-    ex.printStackTrace()
+private suspend fun respondWorldgenError(call: ApplicationCall, e: Throwable) {
+    val (status, body) = when (e) {
+        is WorldgenError.InvalidCoordinate ->
+            HttpStatusCode.BadRequest to ErrorBody(e.code, e.message!!, e.coord)
+        is WorldgenError.Timeout ->
+            HttpStatusCode.GatewayTimeout to ErrorBody(e.code, e.message!!, e.coord)
+        is WorldgenError.WasmFailure ->
+            HttpStatusCode.BadGateway to ErrorBody(e.code, e.message!!, e.coord)
+        else -> {
+            // Catch-all for unexpected throwables (bugs, V8 native errors,
+            // Javet wrappers we didn't anticipate). Log the full detail
+            // server-side; do NOT echo e.message to the client — it can
+            // contain file paths, internal class names, or other state we
+            // don't want to leak.
+            System.err.println(
+                "[ERROR] Unexpected throwable in worldgen route: " +
+                    "${e::class.qualifiedName}: ${e.message}"
+            )
+            e.printStackTrace(System.err)
+            HttpStatusCode.InternalServerError to
+                ErrorBody("UNEXPECTED", "An unexpected server error occurred")
+        }
+    }
+    call.respond(status, body)
+}
