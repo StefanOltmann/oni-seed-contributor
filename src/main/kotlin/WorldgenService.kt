@@ -1,3 +1,20 @@
+/*
+ * ONI Contribitor service
+ * Copyright (C) 2026 Stefan Oltmann
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 import com.caoccao.javet.exceptions.JavetException
 import de.stefan_oltmann.oni.model.ClusterType
 import kotlinx.coroutines.TimeoutCancellationException
@@ -59,12 +76,21 @@ class WorldgenService(
  */
 private fun scheduleSelfTermination(coord: String) {
     Thread {
+        // 2s safety margin. The 504 is typically on the wire in <50 ms
+        // (Ktor's Netty backend writes synchronously inside `call.respond`),
+        // so the long delay is headroom against a temporarily congested
+        // write queue or a very slow network. There is no in-process way
+        // to *confirm* the response has flushed before we exit; this delay
+        // is the entire defense against truncating the 504 in flight.
         Thread.sleep(2_000)
         System.err.println(
             "[FATAL] Worldgen timeout for '$coord' — exiting (70). Orchestrator should restart."
         )
         kotlin.system.exitProcess(70)
     }.apply {
+        // isDaemon = false is deliberate: a daemon thread would be killed
+        // by the JVM shutdown that exitProcess triggers, defeating the
+        // entire point. We need this thread to outlive any pending shutdown.
         isDaemon = false
         name = "worldgen-self-termination"
         start()
