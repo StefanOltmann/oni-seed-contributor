@@ -19,19 +19,17 @@ import io.ktor.server.application.Application
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 
+// TEMPORARY stub — Tasks 3 and 6 of the implementation plan: the route layer
+// (Routings.kt) now requires a WorldgenService, but the real wiring with
+// JavetWorldgenRuntime lands in Task 6 once the runtime exists (Task 5).
+// In the meantime, a no-op generator keeps the build green so the route
+// tests can run. DO NOT ship this — Task 6 replaces the body of main().
 fun main() {
-
-    val json = Worldgen.generate("PRE-C-719330309-0-0-ZB937")
-
-    println(json)
+    val service = WorldgenService(generator = { """{"stub":"runtime not wired yet"}""" })
 
     embeddedServer(
         factory = Netty,
         port = 8080,
         host = "0.0.0.0",
-        module = Application::module
-    ).start(wait = true)
+    ) { configureRouting(service) }.start(wait = true)
 }
-
-fun Application.module() =
-    configureRouting()
