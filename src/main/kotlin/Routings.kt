@@ -18,6 +18,7 @@
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
@@ -25,10 +26,14 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
+import io.ktor.server.routing.RoutingContext
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 
-fun Application.configureRouting() {
+fun Application.configureRouting(
+    service: ContributorService,
+    controlApiKey: String?,
+) {
 
     println("[INIT] Starting Server at version $VERSION")
 
@@ -60,29 +65,51 @@ fun Application.configureRouting() {
 
             val cluster = WorldgenMapDataConverter.convert(
                 mapData = mapData,
-                gameVersion = 42 // FIXME
+                gameVersion = WORLDGEN_GAME_VERSION
             )
 
             call.respond(cluster)
         }
 
         get("/status") {
-
-            // TODO Report what the ContributorService is doing.
+            call.respond(service.status())
         }
 
         get("/start") {
-
-            val apiKey: String? = this.call.request.headers["API_KEY"]
-
-            // TODO check API key & start the worldgen
+            if (!authorize(controlApiKey)) return@get
+            val started = service.start()
+            call.respondText(
+                if (started) "started" else "already running"
+            )
         }
 
         get("/stop") {
-
-            val apiKey: String? = this.call.request.headers["API_KEY"]
-
-            // TODO check API key & stop the worldgen
+            if (!authorize(controlApiKey)) return@get
+            val stopped = service.stop()
+            call.respondText(
+                if (stopped) "stopped" else "not running"
+            )
         }
     }
+}
+
+/**
+ * Returns true if the request may proceed. On rejection, writes the
+ * response itself (403 if no key is configured, 401 on mismatch) and
+ * returns false so the route handler can short-circuit.
+ */
+private suspend fun RoutingContext.authorize(controlApiKey: String?): Boolean {
+    if (controlApiKey == null) {
+        call.respondText(
+            "/start and /stop are disabled — set CONTROL_API_KEY to enable",
+            status = HttpStatusCode.Forbidden,
+        )
+        return false
+    }
+    val provided = call.request.headers["API_KEY"]
+    if (provided != controlApiKey) {
+        call.respondText("invalid API_KEY", status = HttpStatusCode.Unauthorized)
+        return false
+    }
+    return true
 }
