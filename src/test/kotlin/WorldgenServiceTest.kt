@@ -1,3 +1,4 @@
+import com.caoccao.javet.exceptions.JavetError
 import com.caoccao.javet.exceptions.JavetException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
@@ -33,7 +34,15 @@ class WorldgenServiceTest {
 
     @Test
     fun `JavetException becomes WasmFailure`() = runTest {
-        val svc = WorldgenService(generator = { throw JavetException("boom") })
+        // JavetException's constructors take a JavetError, not a free String.
+        // ExecutionFailure has format "${message}", so the resulting
+        // exception.message is exactly "boom".
+        val svc = WorldgenService(generator = {
+            throw JavetException(
+                JavetError.ExecutionFailure,
+                mapOf(JavetError.PARAMETER_MESSAGE to "boom")
+            )
+        })
         val err = svc.generate(VALID_COORD).exceptionOrNull()
         assertIs<WorldgenError.WasmFailure>(err)
         assertEquals(VALID_COORD, err.coord)
