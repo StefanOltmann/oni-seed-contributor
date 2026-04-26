@@ -39,13 +39,13 @@ class JavetWorldgenRuntime : AutoCloseable {
 
     init {
         try {
-            // Log resolved native lib path early — if Javet fails to load
-            // the platform native (musl/Alpine, missing arm64), this is
-            // where the failure is most usefully visible.
-            println(
-                "[INIT] Javet native: " +
-                    "reloadable=${V8Host.isLibraryReloadable()}"
-            )
+            // Log Javet native presence early — if the platform native
+            // failed to load (musl/Alpine, missing arm64), this is where
+            // the failure is most usefully visible. Note: Javet 5.0.6
+            // doesn't expose the resolved native path on V8Host, so this
+            // is best-effort — only the loaded-successfully signal, not
+            // the path itself.
+            println("[INIT] Javet native: reloadable=${V8Host.isLibraryReloadable()}")
 
             // 1. Bind the WASM bytes onto globalThis as a real V8
             //    ArrayBuffer (Javet's globalObject.set(String, ByteArray)

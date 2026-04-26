@@ -63,9 +63,16 @@ fun Application.configureRouting(service: WorldgenService) {
             // Ktor guarantees {coord} is present (the route wouldn't match
             // otherwise), so !! is safe.
             val coord = call.parameters["coord"]!!
+            val started = System.currentTimeMillis()
             service.generate(coord)
-                .onSuccess { call.respondText(it, ContentType.Application.Json) }
-                .onFailure { e -> respondWorldgenError(call, e) }
+                .onSuccess {
+                    call.respondText(it, ContentType.Application.Json)
+                    println("[OK] $coord (${System.currentTimeMillis() - started}ms)")
+                }
+                .onFailure { e ->
+                    respondWorldgenError(call, e)
+                    println("[${(e as? WorldgenError)?.code ?: "UNEXPECTED"}] $coord (${System.currentTimeMillis() - started}ms)")
+                }
         }
     }
 }
