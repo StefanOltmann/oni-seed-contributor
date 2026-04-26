@@ -1,22 +1,23 @@
 # Design — ONI Seed Contributor (WASM Bridge)
 
-**Status:** Approved (revision 2, 2026-04-26)
+**Status:** Shipped (revision 2 approved 2026-04-26; reconciled with the
+implementation 2026-04-26 after the per-task code-review pass surfaced
+several Javet-API and Operations notes that needed back-porting into
+the spec).
 **Scope:** v1 of the Kotlin/JVM ↔ WASM worldgen bridge
 
 ## Context
 
-The `oni-seed-contributor` repo is a Docker-based service intended to expose
+The `oni-seed-contributor` repo is a Docker-based service that exposes
 Oxygen Not Included worldgen — implemented in Rust, distributed as a WASM
 module via the `@tigin-backwards/oxygen-not-included-worldgen` npm package —
 through a JVM service so it can be called from elsewhere in the
-ONI-seed-browser ecosystem.
-
-The current state of the repo: server skeleton (Ktor 3.4.2, Netty), build
-plumbing (Kotlin 2.3.20 / JVM 25, version catalog, multi-arch Docker, GHCR
-publish), Javet on the classpath, and the WASM bundle vendored under
-`src/main/resources/worldgen/`. The bridge itself is unimplemented — the
-init block in `src/main/kotlin/Worldgen.kt` contains a `// TODO` and the
-`worldgen` global it references is never bound into V8.
+ONI-seed-browser ecosystem. v1 is built: 4 production source files, 13
+passing tests (including a real V8 + WASM integration test), multi-arch
+Docker image building from `eclipse-temurin:25-jre`. This document is
+the spec the implementation was built against; deviations the
+implementation made on contact with reality (chiefly Javet 5.0.6 API
+corrections) have been folded back into the relevant sections below.
 
 The owner's stated ask is "throw in a coordinate, get JSON back." The
 storage backend (`oni-seed-browser-backend`) already owns queue, upload,
@@ -110,9 +111,11 @@ src/main/resources/
     logback.xml
     worldgen/                   unchanged (index.js, oni_wasm.js, oni_wasm_bg.wasm, ...)
 src/test/kotlin/
-    WorldgenServiceTest.kt      with FakeRuntime, no V8 needed
-    JavetWorldgenRuntimeTest.kt tag: wasm — boots real V8
-    RoutingsTest.kt             Ktor testApplication + FakeRuntime
+    WorldgenServiceTest.kt          lambda fakes, no V8 needed (5 tests)
+    RoutingsTest.kt                 Ktor testApplication + lambda fakes (5 tests)
+    JavetWorldgenRuntimeTest.kt     gated by SKIP_WASM_TESTS — boots real V8 (3 tests)
+    WorldgenModels.kt               vendored verbatim from oni-seed-browser
+    WorldgenMapDataConverter.kt     vendored verbatim from oni-seed-browser
 src/test/resources/
     sample.json                 unchanged
 ```
@@ -131,8 +134,19 @@ serializes generate() calls. The only file that imports Javet.
 **Constructor (cold start, blocking).** Runs once at process boot.
 
 1. Build a `NodeRuntime` via `V8Host.getNodeInstance().createV8Runtime()`.
-2. Read `worldgen/oni_wasm_bg.wasm` from classpath into a `byte[]` and
-   bind it on `globalThis.wasmBytes` via `V8ValueGlobalObject.set("wasmBytes", bytes)`.
+2. Read `worldgen/oni_wasm_bg.wasm` from classpath into a `ByteArray` and
+   bind it on `globalThis.wasmBytes` as a real V8 ArrayBuffer:
+
+   ```kotlin
+   nodeRuntime.createV8ValueArrayBuffer(wasmBytes.size).use { buf ->
+       buf.fromBytes(wasmBytes)
+       nodeRuntime.globalObject.set("wasmBytes", buf)
+   }
+   ```
+
+   `globalObject.set("wasmBytes", byteArray)` does NOT auto-marshal a
+   `ByteArray` into a JS `BufferSource` — JS would see an opaque Java
+   reference and `new WebAssembly.Module(...)` would reject it.
 3. Register an `IV8ModuleResolver` that compiles modules from classpath:
 
    ```kotlin
@@ -157,7 +171,12 @@ serializes generate() calls. The only file that imports Javet.
 
    ```js
    import init, { worldgen } from './index.js';
-   await init({ module: new WebAssembly.Module(globalThis.wasmBytes) });
+   // wasm-bindgen's web-target init expects { module_or_path: ... }.
+   // Passing a pre-compiled WebAssembly.Module skips the URL/fetch path
+   // that doesn't work in Javet (no import.meta.url base). The wrong
+   // key (`module:`) leaves wasm-bindgen with `module_or_path === undefined`
+   // and produces "TypeError: Invalid URL" at runtime.
+   await init({ module_or_path: new WebAssembly.Module(globalThis.wasmBytes) });
    globalThis.__generate = function (coord) {
        const r = worldgen.generate(coord);
        // Drop typed-array fields BEFORE JSON.stringify; otherwise they
@@ -190,14 +209,25 @@ serializes generate() calls. The only file that imports Javet.
    };
    ```
 
-   Held as a `private const val` at the top of the file. Executed via
-   `nodeRuntime.getExecutor(BOOTSTRAP_SRC).setResourceName("./bootstrap.mjs")
-   .setModule(true).executeVoid()`.
+   Held as a `private const val` at the bottom of the file (next to the
+   runtime that loads it; matches DD-008's flat layout). Compile and
+   execute the bootstrap explicitly so top-level `await init(...)`
+   actually completes before we look up `__generate`:
 
-5. `nodeRuntime.await()` to drain pending microtasks (the dynamic
-   `await init(...)`).
+   ```kotlin
+   nodeRuntime.getExecutor(BOOTSTRAP_SRC)
+       .setResourceName("./bootstrap.mjs")
+       .setModule(true)
+       .compileV8Module()
+       .use { module -> module.executeVoid() }
+   ```
+
+5. `nodeRuntime.await()` to drain the microtask queue and the Node event
+   loop until `await init(...)` settles. Then `check(!nodeRuntime.isDead)`
+   so a silent WASM-init rejection surfaces as a hard failure rather than
+   a confusing "function is undefined" downstream.
 6. Cache a handle to `globalThis.__generate` as a `V8ValueFunction` field
-   on the runtime instance, so per-call invocation skips re-resolving the
+   on the runtime instance so per-call invocation skips re-resolving the
    global.
 
 **Public API.**
@@ -209,21 +239,58 @@ class JavetWorldgenRuntime : AutoCloseable {
     private val nodeRuntime: NodeRuntime
     private val generateFn: V8ValueFunction
 
-    /** coord in, trimmed JSON out. Serialized via internal mutex. */
+    /**
+     * coord in, trimmed JSON out. Serialized via internal mutex.
+     *
+     * Note: `V8ValueFunction.invokeString(arg)` does NOT exist in
+     * Javet 5.0.6 — that's the host-call form on `IV8ValueObject`. For
+     * a cached function reference, use `callString(receiver, args...)`
+     * with `null` as the receiver.
+     */
     suspend fun generate(coord: String): String =
-        mutex.withLock { generateFn.invokeString(coord) }
+        mutex.withLock { generateFn.callString(null, coord) }
 
-    override fun close() {
-        nodeRuntime.setPurgeEventLoopBeforeClose(true)
-        generateFn.close()
-        nodeRuntime.close()
+    /**
+     * Holds the mutex (via runBlocking) so an in-flight generate
+     * finishes before we release the V8 handle — without this, a
+     * concurrent close + generate would free the native handle out
+     * from under a running call. The wait is bounded by withTimeout
+     * so a runaway native call (the same situation that triggered
+     * exitProcess(70) — see DD-011) doesn't deadlock the JVM
+     * shutdown hook indefinitely.
+     */
+    override fun close() = runBlocking {
+        try {
+            withTimeout(3.seconds) {
+                mutex.withLock {
+                    try { generateFn.close() } catch (_: Throwable) { /* swallow */ }
+                    nodeRuntime.close()
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            // Mutex is still held by a runaway native call; the
+            // orchestrator's force-kill is the backstop. Best we can
+            // do here is avoid blocking the shutdown sequence longer.
+            System.err.println("[WARN] close() gave up after 3s; runtime mutex held by runaway native call")
+        }
     }
 }
 ```
 
-`invokeString(coord)` passes the coordinate as a real V8 string argument
-— there is no JavaScript-source string concatenation anywhere, which
-removes the JS-injection shape that the current `Worldgen.kt:33` has.
+Note on `setPurgeEventLoopBeforeClose(boolean)`: earlier drafts of this
+spec called it before `close()`. The method does not exist on
+`V8Runtime` in Javet 5.0.6; default `close()` performs the necessary
+event-loop cleanup. Don't reintroduce the call.
+
+Note on `V8Host.isLibraryReloadable()`: it is **static** on `V8Host`,
+not an instance method on the result of `V8Host.getNodeInstance()`.
+The cold-start log emits `V8Host.isLibraryReloadable()` for diagnostic
+purposes; the resolved native path itself is not exposed by 5.0.6.
+
+`callString(null, coord)` passes the coordinate as a real V8 string
+argument — there is no JavaScript-source string concatenation
+anywhere, which removes the JS-injection shape that the original
+`Worldgen.kt` had before this rewrite.
 
 **The pool seam, revisited.** The single-runtime case does not need a
 separate `Pool` class — the `Mutex` lives on the runtime itself. When v2
@@ -548,20 +615,26 @@ just a lambda — no fake class, no interface. Cases:
   serialization (regression guard against the typed-array
   `JSON.stringify` foot-gun — if the JS strip ever stops running before
   stringify, this catches it loudly)
-- the result parses successfully via the frontend's actual converter:
+- the result parses successfully via the frontend's actual converter,
+  using a tolerant `Json` (the WASM bundle frequently grows fields
+  the vendored model doesn't know — strict decoding would false-fail
+  on every npm bump):
 
   ```kotlin
-  val mapData = WorldgenMapData.fromJson(result)
+  val tolerantJson = Json { ignoreUnknownKeys = true; isLenient = true }
+  val mapData = tolerantJson.decodeFromString<WorldgenMapData>(result)
   val cluster = WorldgenMapDataConverter.convert(mapData, gameVersion = 0)
   assertEquals(coord, cluster.coordinate)
   assertTrue(cluster.asteroids.isNotEmpty())
   ```
 
   This is the strongest cheap assertion that what we produce matches what
-  the rest of the ecosystem consumes. `WorldgenMapData` and
-  `WorldgenMapDataConverter` currently live in `oni-seed-browser`'s
-  commonMain — copy them into `src/test/kotlin/` (they're small) rather
-  than introducing a build-time dependency on the frontend module. Mark
+  the rest of the ecosystem consumes. The typed-array leak test (above)
+  is what guards the JS strip behaviour; the converter round-trip
+  guards structural shape. `WorldgenMapData` and
+  `WorldgenMapDataConverter` live in `oni-seed-browser`'s commonMain —
+  copy them into `src/test/kotlin/` (they're small) rather than
+  introducing a build-time dependency on the frontend module. Mark
   the copies with a comment pinning their source commit and the npm
   package version.
 
@@ -593,25 +666,23 @@ Linux Javet native is on the classpath — see Operations below.
 
 ## Operations
 
-### Javet native libraries — must fix before deploy
+### Javet native libraries
 
-Today `build.gradle.kts` declares only `javet-node-windows-x86_64`. The
-current `Dockerfile` builds an `eclipse-temurin:25-jre-alpine` image;
-Javet does **not** ship a musl-libc native, so the JAR will fail to load
-`libnode` on Alpine.
+Javet does **not** ship a musl-libc native, so the runtime image must
+be glibc-based. The Dockerfile uses `eclipse-temurin:25-jre`
+(Debian-slim); do NOT switch back to `:25-jre-alpine` — the JAR will
+fail to load `libnode`.
 
-Required changes:
+The version catalog declares all three platform natives as
+`runtimeOnly`: `javet-node-windows-x86_64` (local dev),
+`javet-node-linux-x86_64` and `javet-node-linux-arm64` (Docker target,
+CI builds both architectures). All three ship in the fat JAR; only the
+matching one is loaded at runtime.
 
-- Add `javet-node-linux-x86_64` and `javet-node-linux-arm64` to the
-  version catalog (CI builds both architectures). Keep the Windows native
-  for dev. All three can ship in the fat jar (a few MB per native).
-- Switch the runtime base from `eclipse-temurin:25-jre-alpine` to
-  `eclipse-temurin:25-jre` (Debian-slim). Costs ~30 MB image size, gains
-  glibc.
-- At process start, log `V8Host.getNodeInstance().isLibraryReloadable`
-  and the resolved native library path. If load fails, the message
-  should make clear *which* artifact is missing, not just "library not
-  found."
+At process start, the runtime logs `V8Host.isLibraryReloadable()` so a
+missing-native failure is visible early. The resolved native library
+path itself is not exposed by Javet 5.0.6, so the log is best-effort
+("library loaded successfully" not "loaded from /path/...").
 
 ### Build dependency
 
@@ -641,20 +712,25 @@ No config file. No DI container. No reserved-but-unused vars.
 
 ### Shutdown
 
-JVM shutdown hook calls `runtime.close()`. The close path sets
-`nodeRuntime.setPurgeEventLoopBeforeClose(true)` first — without it,
-pending Node tasks can keep the JVM alive past process shutdown.
+JVM shutdown hook calls `runtime.close()`. The close holds the runtime
+mutex (via `runBlocking`) so an in-flight generate finishes before the
+V8 handle is released — without this, a concurrent close + generate
+would free the native handle out from under a running call. The wait
+is bounded by `withTimeout(3.seconds)` so the
+exitProcess(70)-on-timeout path (DD-011) doesn't deadlock the shutdown
+hook indefinitely if the runaway native call is the very thing the
+mutex is held by. After the timeout, the orchestrator's force-kill is
+the backstop.
 
 ### Observability v1
 
-Existing logback + `println`-style logging is fine. Add:
-
-- per-request log line with coord, outcome, duration ms
-- WARN/ERROR levels for failure variants per "Error Handling" above
-- `GET /` keeps reporting version + uptime
-
-No Prometheus/metrics endpoint in v1; bolt on later via
-`ktor-server-metrics-micrometer`.
+`println`-style logging is the standing convention (matches sibling
+`oni-seed-browser-backend`'s house style). Per-request log line with
+coord, outcome, and duration ms is implemented in `Routings.kt`. The
+catch-all 500 path logs the full throwable to stderr. Cold start
+emits `[INIT] Javet native: reloadable=...` so a missing-native
+failure is visible early. No structured logging or metrics endpoint
+in v1; bolt on later via `ktor-server-metrics-micrometer` if needed.
 
 ## Migration from current code
 
@@ -684,12 +760,14 @@ src/main/resources/
     worldgen/                 (unchanged: index.js, oni_wasm.js, oni_wasm_bg.wasm, ...)
 src/test/kotlin/
     WorldgenServiceTest.kt
-    JavetWorldgenRuntimeTest.kt    (tag: wasm; copies WorldgenMapData + WorldgenMapDataConverter)
     RoutingsTest.kt
+    JavetWorldgenRuntimeTest.kt        (gated by SKIP_WASM_TESTS env var)
+    WorldgenModels.kt                  (vendored verbatim from oni-seed-browser)
+    WorldgenMapDataConverter.kt        (vendored verbatim from oni-seed-browser)
 src/test/resources/
     sample.json               (unchanged)
 ```
 
-Four files under `src/main/kotlin/`, three test files. No interfaces, no
-sealed `Result` wrapper, no `ErrorMapping`/`JsBridge`/`Postprocessor`
-files, no DI container.
+Four files under `src/main/kotlin/`, five test files (three of ours
+plus the two vendored). No interfaces, no sealed `Result` wrapper, no
+`ErrorMapping`/`JsBridge`/`Postprocessor` files, no DI container.

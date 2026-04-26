@@ -158,6 +158,7 @@ The service is pure orchestration: validate coordinate syntactically, enforce a 
 Create `src/test/kotlin/WorldgenServiceTest.kt`:
 
 ```kotlin
+import com.caoccao.javet.exceptions.JavetError
 import com.caoccao.javet.exceptions.JavetException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
@@ -193,7 +194,15 @@ class WorldgenServiceTest {
 
     @Test
     fun `JavetException becomes WasmFailure`() = runTest {
-        val svc = WorldgenService(generator = { throw JavetException("boom") })
+        // JavetException's constructors take a JavetError + parameter map,
+        // not a free String. ExecutionFailure has format "${message}", so
+        // the resulting exception.message is exactly "boom".
+        val svc = WorldgenService(generator = {
+            throw JavetException(
+                JavetError.ExecutionFailure,
+                mapOf(JavetError.PARAMETER_MESSAGE to "boom")
+            )
+        })
         val err = svc.generate(VALID_COORD).exceptionOrNull()
         assertIs<WorldgenError.WasmFailure>(err)
         assertEquals(VALID_COORD, err.coord)
@@ -808,23 +817,47 @@ class JavetWorldgenRuntime : AutoCloseable {
                 )
         } catch (t: Throwable) {
             // Constructor failed — release native resources before
-            // propagating, otherwise the NodeRuntime leaks.
-            try {
-                nodeRuntime.setPurgeEventLoopBeforeClose(true)
-                nodeRuntime.close()
-            } catch (_: Throwable) { /* swallow */ }
+            // propagating, otherwise the NodeRuntime leaks. Note:
+            // setPurgeEventLoopBeforeClose() does NOT exist on V8Runtime
+            // in Javet 5.0.6; default close() handles the event-loop
+            // cleanup correctly.
+            try { nodeRuntime.close() } catch (_: Throwable) { /* swallow */ }
             throw t
         }
     }
 
-    /** coord in, trimmed JSON out. Serialized via internal mutex. */
+    /**
+     * coord in, trimmed JSON out. Serialized via internal mutex.
+     *
+     * V8ValueFunction.invokeString(arg) does not exist in Javet 5.0.6 —
+     * that's the host-call form on IV8ValueObject. For a cached function
+     * reference, use callString(receiver, args...) with `null` as the
+     * receiver.
+     */
     suspend fun generate(coord: String): String =
-        mutex.withLock { generateFn.invokeString(coord) }
+        mutex.withLock { generateFn.callString(null, coord) }
 
-    override fun close() {
-        try { generateFn.close() } catch (_: Throwable) { /* swallow */ }
-        nodeRuntime.setPurgeEventLoopBeforeClose(true)
-        nodeRuntime.close()
+    /**
+     * Holds the mutex via runBlocking so an in-flight generate finishes
+     * before the V8 handle is released — without this, a concurrent
+     * close + generate would crash the JVM (native handle freed under a
+     * running call). Bounded by withTimeout(3s) so a runaway native
+     * call (the situation that triggers exitProcess(70) — see DD-011)
+     * can't deadlock the JVM shutdown hook.
+     */
+    override fun close() = runBlocking {
+        try {
+            withTimeout(3.seconds) {
+                mutex.withLock {
+                    try { generateFn.close() } catch (_: Throwable) { /* swallow */ }
+                    nodeRuntime.close()
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            System.err.println(
+                "[WARN] close() gave up after 3s; runtime mutex held by runaway native call"
+            )
+        }
     }
 
     private fun loadClasspathBytes(path: String): ByteArray {
@@ -1011,8 +1044,9 @@ curl -s http://localhost:8080/generate/PRE-C-719330309-0-0-ZB937 | head -c 100
 ```
 
 Stop the server with Ctrl+C; confirm it exits cleanly within a couple of
-seconds (the shutdown hook + `setPurgeEventLoopBeforeClose(true)` should
-close the NodeRuntime promptly).
+seconds (the shutdown hook calls `runtime.close()`, which holds the
+runtime mutex via `runBlocking { withTimeout(3.seconds) { ... } }` so
+an in-flight generate finishes before the V8 handle is released).
 
 - [ ] **Step 4: Commit**
 
