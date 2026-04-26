@@ -76,8 +76,11 @@ dependencies {
     implementation(libs.bundles.ktor.server)
     implementation(libs.logback.classic)
 
-    /* Ktor client (kept for future contributor wiring) */
+    /* Ktor client — used by ContributorService to POST uploads to the backend. */
+    implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.okhttp)
+    implementation(libs.ktor.client.content.negotiation)
+    implementation(libs.ktor.serialization.json)
 
     /* Coroutines */
     implementation(libs.kotlinx.coroutines.core)

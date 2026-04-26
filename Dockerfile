@@ -12,6 +12,7 @@ RUN ./gradlew --no-daemon --info test buildFatJar
 
 FROM --platform=$TARGETPLATFORM eclipse-temurin:25-jre
 EXPOSE 8080:8080
-RUN mkdir /app
+RUN mkdir /app /data
+VOLUME /data
 COPY --from=BUILD_STAGE /tmp/build/libs/*-all.jar /app/ktor-server.jar
 ENTRYPOINT ["java","-Xlog:gc+init","-XX:+PrintCommandLineFlags","-jar","/app/ktor-server.jar"]
