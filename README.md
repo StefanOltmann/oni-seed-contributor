@@ -34,6 +34,33 @@ build your own image and don't bake it in, pass it explicitly via
 A 1 GB memory limit is comfortable; the V8 + WASM heap typically sits
 ~150 MB at idle and grows to 300–500 MB under load.
 
+### Pin a stable installation ID (optional)
+
+Without configuration, the contributor mints a fresh UUID on every
+boot and prints it to stdout — the backend dedupes uploads by Steam
+ID + coordinate, so this is fine for most operators. If you'd rather
+the backend see the same installation across container restarts, mint
+a UUID once and pass it via `INSTALLATION_ID`:
+
+```bash
+# 1. Mint a UUID (any UUID v4 generator works; uuidgen is BSD/macOS,
+#    `python -c "import uuid;print(uuid.uuid4())"` is portable):
+INSTALLATION_ID=$(uuidgen | tr 'A-Z' 'a-z')
+
+# 2. Pass it on every `docker run` for this contributor:
+docker run --rm -p 8080:8080 \
+  -e STEAM_AUTH_TOKEN=eyJ... \
+  -e INSTALLATION_ID=$INSTALLATION_ID \
+  ghcr.io/stefanoltmann/oni-seed-contributor:latest
+
+# 3. (Or in a docker-compose.yml / k8s Deployment, set INSTALLATION_ID
+#    in the env block alongside STEAM_AUTH_TOKEN.)
+```
+
+The service refuses to boot if `INSTALLATION_ID` is set but isn't a
+valid UUID, so a typo can't silently rewrite to gibberish that the
+backend would reject on every upload.
+
 ### Multi-arch image build (amd64 + arm64)
 
 Docker buildx is required for native multi-arch images:
