@@ -51,9 +51,6 @@ SKIP_WASM_TESTS=1 ./gradlew test              # skip the V8 path (Alpine, missin
 JDK 25 is auto-provisioned by foojay-resolver on first build (see
 `settings.gradle.kts`). No manual JDK install required.
 
-The shell here is bash on Windows (Git Bash). `find`, `head`, `rm`
-work; use forward slashes in paths. PowerShell is also available.
-
 ## Architecture
 
 Three layers in flat files (no packages) — matches sibling
@@ -155,22 +152,21 @@ but fail at runtime. Document any new ones you find here.
 
 ## Ecosystem context
 
-Sibling repos that this service interacts with conceptually (none are
-build-time dependencies; all live in the same `IdeaProjects/` parent
-directory):
+Sibling repos this service interacts with conceptually (none are
+build-time dependencies, but knowing they exist explains design calls):
 
 | Repo | Role |
 |---|---|
-| `oni-seed-browser-backend` | Storage, queue, upload, dedup, Steam JWT verification. Routes: `POST /upload`, `POST /request-coordinate`, `POST /requested-coordinate`, `POST /report-worldgen-failure`. |
-| `oni-seed-browser` | Compose Multiplatform frontend. `service/DefaultWebClient.kt:332` already does in-browser WASM run + `POST /upload` with the user's Steam JWT and the `"onimaxxing 2.0.1"` mod-hash stamp. This service is the server-side equivalent of just the WASM-run portion. |
-| `oni-seed-browser-model` | Shared model types (build dep at version `cc174d2`). The post-upload `Cluster` lives here; the intermediate `WorldgenMapData` does not (it's frontend-only and gets vendored into our test sources). |
+| [oni-seed-browser-backend](https://github.com/StefanOltmann/oni-seed-browser-backend) | Storage, queue, upload, dedup, Steam JWT verification. Routes: `POST /upload`, `POST /request-coordinate`, `POST /requested-coordinate`, `POST /report-worldgen-failure`. |
+| [oni-seed-browser](https://github.com/StefanOltmann/oni-seed-browser) | Compose Multiplatform frontend. `app/src/commonMain/kotlin/service/DefaultWebClient.kt` already does in-browser WASM run + `POST /upload` with the user's Steam JWT and the `"onimaxxing 2.0.1"` mod-hash stamp. This service is the server-side equivalent of just the WASM-run portion. |
+| [oni-seed-browser-model](https://github.com/StefanOltmann/oni-seed-browser-model) | Shared model types (build dep at version `cc174d2`). The post-upload `Cluster` lives here; the intermediate `WorldgenMapData` does not (it's frontend-only and gets vendored into our test sources). |
 
-The owner runs the deployed stack as Docker images on a VPS:
-`steam-login-helper`, `oni-seed-browser-backend`, `oni-seed-browser`,
-plus this contributor service. The contributor service does not call
-any of the others; a future "container for map collection" (the
-orchestrator the owner mentioned) will sit between this service and
-the backend.
+The deployed stack is a set of cooperating Docker images
+(`steam-login-helper`, `oni-seed-browser-backend`, `oni-seed-browser`,
+plus this contributor service). The contributor service does not call
+any of the others; an orchestrator container ("map collection" — not
+yet in any repo) will eventually sit between this service and the
+backend.
 
 ## Deploy & CI
 
