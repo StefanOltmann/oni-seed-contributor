@@ -25,6 +25,16 @@ import io.ktor.server.netty.Netty
 // In the meantime, a no-op generator keeps the build green so the route
 // tests can run. DO NOT ship this — Task 6 replaces the body of main().
 fun main() {
+    // Hard guard: if someone runs the stub by accident (Docker image built
+    // from a mid-implementation branch), the process refuses to start. The
+    // stub returns 200 OK with plausible-looking JSON, so a silent
+    // misdeployment would otherwise be hard to notice.
+    check(System.getenv("WORLDGEN_STUB_OK") == "1") {
+        "Application.kt is a temporary stub (Task 3 of the implementation plan). " +
+            "DO NOT run this in production — Task 6 replaces main(). " +
+            "Set WORLDGEN_STUB_OK=1 only in controlled test environments."
+    }
+
     val service = WorldgenService(generator = { """{"stub":"runtime not wired yet"}""" })
 
     embeddedServer(

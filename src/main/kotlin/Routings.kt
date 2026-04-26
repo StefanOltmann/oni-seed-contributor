@@ -47,7 +47,8 @@ fun Application.configureRouting(service: WorldgenService) {
     install(CORS) {
         allowMethod(HttpMethod.Options)
         allowMethod(HttpMethod.Get)
-        allowHeader(HttpHeaders.AccessControlAllowOrigin)
+        // Access-Control-Allow-Origin is a *response* header set by the
+        // server; only request headers belong in allowHeader().
         allowHeader(HttpHeaders.ContentType)
         anyHost()
     }
@@ -77,9 +78,20 @@ private suspend fun respondWorldgenError(call: ApplicationCall, e: Throwable) {
             HttpStatusCode.GatewayTimeout to ErrorBody(e.code, e.message!!, e.coord)
         is WorldgenError.WasmFailure ->
             HttpStatusCode.BadGateway to ErrorBody(e.code, e.message!!, e.coord)
-        else ->
+        else -> {
+            // Catch-all for unexpected throwables (bugs, V8 native errors,
+            // Javet wrappers we didn't anticipate). Log the full detail
+            // server-side; do NOT echo e.message to the client — it can
+            // contain file paths, internal class names, or other state we
+            // don't want to leak.
+            System.err.println(
+                "[ERROR] Unexpected throwable in worldgen route: " +
+                    "${e::class.qualifiedName}: ${e.message}"
+            )
+            e.printStackTrace(System.err)
             HttpStatusCode.InternalServerError to
-                ErrorBody("UNEXPECTED", e.message ?: e::class.simpleName.orEmpty())
+                ErrorBody("UNEXPECTED", "An unexpected server error occurred")
+        }
     }
     call.respond(status, body)
 }
