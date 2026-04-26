@@ -19,6 +19,7 @@ import com.caoccao.javet.interop.NodeRuntime
 import com.caoccao.javet.interop.V8Host
 import com.caoccao.javet.values.reference.V8ValueArrayBuffer
 import com.caoccao.javet.values.reference.V8ValueFunction
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -123,9 +124,18 @@ class JavetWorldgenRuntime : AutoCloseable {
     suspend fun generate(coord: String): String =
         mutex.withLock { generateFn.callString(null, coord) }
 
-    override fun close() {
-        try { generateFn.close() } catch (_: Throwable) { /* swallow */ }
-        nodeRuntime.close()
+    /**
+     * Close holds the mutex so an in-flight generate finishes naturally
+     * before the V8 handle is released — without this, a concurrent
+     * generate would see a freed handle (JVM crash via the Javet native
+     * call). Uses runBlocking because AutoCloseable.close is not suspend;
+     * acceptable on a shutdown hook where blocking is fine.
+     */
+    override fun close() = runBlocking {
+        mutex.withLock {
+            try { generateFn.close() } catch (_: Throwable) { /* swallow */ }
+            nodeRuntime.close()
+        }
     }
 
     private fun loadClasspathBytes(path: String): ByteArray {
@@ -144,6 +154,20 @@ class JavetWorldgenRuntime : AutoCloseable {
     }
 }
 
+/**
+ * Bootstrap module + the `__generate` function.
+ *
+ * **Strip-list parity:** the field-deletion list below MUST stay in
+ * lockstep with the upstream onimaxxing JS (see
+ * `oni-seed-browser/app/src/wasmJsMain/resources/worldgen.worker.mjs`)
+ * and bump in lockstep when the npm package
+ * (`@tigin-backwards/oxygen-not-included-worldgen`) version changes.
+ *
+ * **Kotlin raw-string caveat:** this is a `"""..."""` literal, so a
+ * literal `$` would interpolate as a Kotlin expression. The current
+ * source has none, but if you add JS template literals here (`` `${x}` ``),
+ * escape the `$` as `${'$'}` to keep the JS source intact.
+ */
 private const val BOOTSTRAP_SRC = """
 import init, { worldgen } from './index.js';
 
