@@ -50,26 +50,32 @@ repositories {
 
 dependencies {
 
-    /*
-     * Ktor server
-     */
+    /* Ktor server */
     implementation(libs.bundles.ktor.server)
     implementation(libs.logback.classic)
 
-    /*
-     * Ktor client
-     */
+    /* Ktor client (kept for future contributor wiring) */
     implementation(libs.ktor.client.okhttp)
 
+    /* Coroutines */
+    implementation(libs.kotlinx.coroutines.core)
+
+    /* Domain model */
     implementation(libs.oniSeedBrowserModel)
 
+    /* Javet — core + per-platform natives.
+     * The Windows native is needed for local dev; the two Linux natives
+     * are needed for the Docker image (amd64 + arm64 from CI). All three
+     * are runtimeOnly so they don't appear on the compile classpath. */
     implementation(libs.javet.core)
-    implementation(libs.javet.windows)
+    runtimeOnly(libs.javet.windows)
+    runtimeOnly(libs.javet.linux.amd64)
+    runtimeOnly(libs.javet.linux.arm64)
 
-    /*
-     * Unit tests
-     */
+    /* Tests */
     testImplementation(libs.kotlin.test.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.ktor.server.test.host)
 }
 
 // region Version
