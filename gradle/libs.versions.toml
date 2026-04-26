@@ -25,16 +25,14 @@ logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "lo
 ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
 
 # Javet (Node.js/V8 integration)
-javet-core = { module = "com.caoccao.javet:javet", version.ref = "javet" }
-javet-windows = { module = "com.caoccao.javet:javet-node-windows-x86_64", version.ref = "javet" }
+javet-core        = { module = "com.caoccao.javet:javet",                       version.ref = "javet" }
+javet-windows     = { module = "com.caoccao.javet:javet-node-windows-x86_64",   version.ref = "javet" }
+javet-linux-amd64 = { module = "com.caoccao.javet:javet-node-linux-x86_64",     version.ref = "javet" }
+javet-linux-arm64 = { module = "com.caoccao.javet:javet-node-linux-arm64",      version.ref = "javet" }
 
 # Coroutines
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
-
-# Javet (additional platform natives — runtime only)
-javet-linux-amd64 = { module = "com.caoccao.javet:javet-node-linux-x86_64", version.ref = "javet" }
-javet-linux-arm64 = { module = "com.caoccao.javet:javet-node-linux-arm64",  version.ref = "javet" }
 
 # Ktor server testing
 ktor-server-test-host = { module = "io.ktor:ktor-server-test-host", version.ref = "ktor" }
