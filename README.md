@@ -43,9 +43,9 @@ the backend see the same installation across container restarts, mint
 a UUID once and pass it via `INSTALLATION_ID`:
 
 ```bash
-# 1. Mint a UUID (any UUID v4 generator works; uuidgen is BSD/macOS,
-#    `python -c "import uuid;print(uuid.uuid4())"` is portable):
-INSTALLATION_ID=$(uuidgen | tr 'A-Z' 'a-z')
+# 1. Mint a UUID (https://www.uuidgenerator.net/ is the easy path;
+#    `uuidgen` works on macOS/BSD if you'd rather stay in the shell):
+INSTALLATION_ID=11111111-2222-3333-4444-555555555555
 
 # 2. Pass it on every `docker run` for this contributor:
 docker run --rm -p 8080:8080 \
