@@ -19,9 +19,12 @@ import com.caoccao.javet.interop.NodeRuntime
 import com.caoccao.javet.interop.V8Host
 import com.caoccao.javet.values.reference.V8ValueArrayBuffer
 import com.caoccao.javet.values.reference.V8ValueFunction
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Owns one V8/Node runtime, the instantiated WASM module, and a cached
@@ -130,11 +133,30 @@ class JavetWorldgenRuntime : AutoCloseable {
      * generate would see a freed handle (JVM crash via the Javet native
      * call). Uses runBlocking because AutoCloseable.close is not suspend;
      * acceptable on a shutdown hook where blocking is fine.
+     *
+     * The wait is bounded by withTimeout(3.seconds) for the case where
+     * close() runs as a shutdown hook triggered by exitProcess(70) on a
+     * timeout (DD-011) and the runaway native call is the very thing
+     * holding the mutex. Without the bound, the hook would block
+     * forever and only the orchestrator's force-kill would free the
+     * container; with the bound, we give up gracefully and let the JVM
+     * exit. The timeout path leaks the V8 handle in that unusual case,
+     * but the OS reaps the process anyway.
      */
     override fun close() = runBlocking {
-        mutex.withLock {
-            try { generateFn.close() } catch (_: Throwable) { /* swallow */ }
-            nodeRuntime.close()
+        try {
+            withTimeout(3.seconds) {
+                mutex.withLock {
+                    try { generateFn.close() } catch (_: Throwable) { /* swallow */ }
+                    nodeRuntime.close()
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            System.err.println(
+                "[WARN] JavetWorldgenRuntime.close() gave up after 3s; " +
+                    "runtime mutex held by a runaway native call. The JVM will exit; " +
+                    "the OS reaps the leaked V8 handle."
+            )
         }
     }
 
