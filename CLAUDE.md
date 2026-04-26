@@ -51,13 +51,6 @@ SKIP_WASM_TESTS=1 ./gradlew test              # skip the V8 path (Alpine, missin
 JDK 25 is auto-provisioned by foojay-resolver on first build (see
 `settings.gradle.kts`). No manual JDK install required.
 
-**Avoid `./gradlew clean test`** — `Version.kt` is generated in
-`afterEvaluate` without a proper task dependency on `compileKotlin`,
-so a fresh `clean` leaves the constant unresolved on the next compile.
-Pre-existing build wart, harmless in CI (the Dockerfile uses
-`./gradlew test buildFatJar` without `clean`). Fix is a low-priority
-follow-up.
-
 The shell here is bash on Windows (Git Bash). `find`, `head`, `rm`
 work; use forward slashes in paths. PowerShell is also available.
 
@@ -179,16 +172,11 @@ any of the others; a future "container for map collection" (the
 orchestrator the owner mentioned) will sit between this service and
 the backend.
 
-## Git remotes
+## Deploy & CI
 
-```
-origin    → https://github.com/raiscan/oni-seed-contributor.git    (user's fork — push here)
-upstream  → https://github.com/StefanOltmann/oni-seed-contributor.git  (Stefan's — pull only)
-```
-
-The CI workflow at `.github/workflows/build.yml` pushes images to
-`ghcr.io/stefanoltmann/oni-seed-contributor:latest`. On the fork it
-will fail until either disabled or rewritten to push to
-`ghcr.io/raiscan/...`. Don't push to `main` on the fork without
-checking with the user first; for routine work, prefer a feature
-branch + merge.
+The GitHub Actions workflow at `.github/workflows/build.yml` builds
+multi-arch (amd64 + arm64) and pushes to
+`ghcr.io/stefanoltmann/oni-seed-contributor:latest` on every push to
+`main`. If you're working on a fork without write access to that GHCR
+namespace, the workflow will fail; either disable it on the fork via
+the Actions tab or rewrite the tag in `build.yml`.
