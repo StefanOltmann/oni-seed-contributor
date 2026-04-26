@@ -1,7 +1,7 @@
 # WASM Bridge Design — ONI Seed Contributor
 
 **Date:** 2026-04-26
-**Status:** Approved (pending implementation)
+**Status:** Approved (revision 2)
 **Scope:** v1 of the Kotlin/JVM ↔ WASM worldgen bridge
 
 ## Context
@@ -21,507 +21,581 @@ init block in `src/main/kotlin/Worldgen.kt` contains a `// TODO` and the
 
 The owner's stated ask is "throw in a coordinate, get JSON back." The
 storage backend (`oni-seed-browser-backend`) already owns queue, upload,
-auth, and dedup, so this service does not need to participate in the
-contributor protocol; it only needs to be a worldgen-as-a-service.
+auth, and dedup, so this service does not participate in the contributor
+protocol; it only needs to be a worldgen-as-a-service. The frontend
+(`oni-seed-browser`) already runs the same WASM client-side and uploads
+under the user's Steam JWT (see
+`oni-seed-browser/app/src/commonMain/kotlin/service/DefaultWebClient.kt:332`),
+so this Docker service is the server-side equivalent of one slice of the
+frontend's flow — the WASM call itself, nothing more.
 
 ## Goals
 
 - `GET /generate/{coord}` returns trimmed worldgen JSON for a valid ONI
-  coordinate.
-- Architecture isolates the V8/Javet runtime behind an interface so a
-  multi-runtime pool can replace the single-runtime implementation without
-  touching the domain or HTTP layers.
+  coordinate. The response is the raw WASM output minus per-cell and
+  similar bulky/derivable fields. Consumers parse it themselves.
+- A single class owns the V8/Javet runtime and serializes access to it; v2
+  can replace that single class with an N-instance pool without touching
+  any other file.
 - Errors are typed and stable across all failure modes (invalid coordinate,
-  WASM panic, timeout, postprocess failure) so an upstream orchestrator can
-  branch on `code` without parsing strings.
-- Postprocessing splits across the JS↔JVM boundary: bulky per-cell arrays
-  are dropped on the JS side (avoid JNI traffic); fine shaping happens in
-  typed Kotlin against `oniSeedBrowserModel`.
+  WASM panic, timeout) so an upstream orchestrator can branch on `code`
+  without parsing strings.
 
 ## Non-Goals (v1)
 
 Caching, authentication, rate limiting, queue integration, upload to the
 backend, metrics endpoint, multi-runtime pool, hot-reload of the WASM
 bundle, schema-validating responses, the full WASM API surface (settle,
-entities, settings bundles, digest, etc.). Each is additive on top of this
-design.
+entities, settings bundles, digest, etc.), and **typed deserialization of
+the result**. The frontend's flow does the parse/convert step itself; we
+have no business owning a `Cluster`/`UploadCluster`/etc. type.
+
+## Why we return raw JSON, not a typed model
+
+The `Cluster` type in `oni-seed-browser-model` is the *post-upload* shape:
+it carries `uploaderSteamIdHash`, `uploaderAuthenticated`, `uploadDate`,
+compacted `BiomePaths`, bitmask traits — fields the WASM cannot supply.
+The frontend's pipeline
+(`oni-seed-browser/app/src/commonMain/kotlin/ui/MapGenerationView.kt:158-167`)
+goes WASM → `WorldgenMapData.fromJson(...)` → `WorldgenMapDataConverter
+.convert(mapData, gameVersion)` → `Cluster`. The intermediate
+`WorldgenMapData` lives in `oni-seed-browser/app/src/commonMain/kotlin/
+worldgen/WorldgenModels.kt` (currently coupled to the frontend module).
+
+Two ways to handle this:
+
+- **Pass through raw JSON.** Service has no opinion on the schema. Every
+  consumer reparses anyway. Keeps the service stateless about model
+  versioning. Chosen.
+- Vendor `WorldgenMapData` into `oni-seed-browser-model` and return that.
+  Better long-term but requires a coordinated change in another repo;
+  out of scope for v1.
+
+The route therefore responds with `application/json` whose body is the
+raw string the WASM produced (after JS-side stripping). No
+`kotlinx.serialization` step in the hot path. No `Postprocessor`.
 
 ## Architecture
 
-Three layers, each only aware of the layer directly below it.
-
 ```
-┌──────────────────────────────── http ────────────────────────────────┐
-│  Routings.kt:  get("/generate/{coord}") { service.generate(coord) }  │
-│  ErrorMapping: WorldgenError → HTTP status + structured body         │
+┌──────────────────────────────── HTTP ────────────────────────────────┐
+│  Routings.kt:  GET /generate/{coord}                                 │
+│      validate, withTimeout, call service, map outcome to HTTP        │
 └─────────────────────────────────┬────────────────────────────────────┘
-                                  ▼ calls
-┌────────────────────────────── worldgen ──────────────────────────────┐
+                                  ▼
+┌────────────────────────────── Service ───────────────────────────────┐
 │  WorldgenService:                                                    │
-│    1. validate coord syntactically                                   │
-│    2. pool.withRuntime { it.generate(coord) }   ← raw trimmed JSON   │
-│    3. Postprocessor.shape(rawJson) → Cluster (oniSeedBrowserModel)   │
-│  Returns Result<Cluster, WorldgenError>                              │
+│    suspend fun generate(coord): Result<String>                       │
+│    classifies failures into WorldgenError sealed class               │
 └─────────────────────────────────┬────────────────────────────────────┘
-                                  ▼ uses
-┌──────────────────────────────── wasm ────────────────────────────────┐
-│  WorldgenRuntimePool:                                                │
-│    suspend fun <T> withRuntime(block: suspend (R) -> T): T           │
-│    (v1: a Mutex + one runtime; v2: a channel of N runtimes)          │
-│                                                                      │
-│  WorldgenRuntime (interface):                                        │
-│    suspend fun generate(coord: String): String   ← trimmed JSON      │
-│                                                                      │
-│  JavetWorldgenRuntime (impl):                                        │
+                                  ▼
+┌────────────────────────────── Runtime ───────────────────────────────┐
+│  JavetWorldgenRuntime:                                               │
 │    boots NodeRuntime, registers a classpath module resolver,         │
 │    runs a bootstrap module that synchronously instantiates the WASM  │
-│    from in-memory bytes, parks `worldgen` on a global, and serves    │
-│    subsequent generate(coord) calls by invoking it.                  │
+│    from in-memory bytes, caches a `V8ValueFunction` for the JS-side  │
+│    "generate-and-strip" function, and serves generate(coord) calls   │
+│    under an internal Mutex.                                          │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Composition
+Three layers, four files (plus `Application.kt` + `Routings.kt`):
 
-`Application.module()` is the composition root. It builds a
-`WorldgenRuntimePool { JavetWorldgenRuntime() }`, constructs
-`WorldgenService(pool, Postprocessor())`, and hands the service to
-`configureRouting(service)`. Nothing else allocates these objects.
+```
+src/main/kotlin/
+    Application.kt              composition root, shutdown hook
+    Routings.kt                 routes + inline error→HTTP mapping
+    WorldgenService.kt          orchestration + sealed WorldgenError
+    JavetWorldgenRuntime.kt     V8/WASM lifecycle + JS strip constant
+src/main/resources/
+    logback.xml
+    worldgen/                   unchanged (index.js, oni_wasm.js, oni_wasm_bg.wasm, ...)
+src/test/kotlin/
+    WorldgenServiceTest.kt      with FakeRuntime, no V8 needed
+    JavetWorldgenRuntimeTest.kt tag: wasm — boots real V8
+    RoutingsTest.kt             Ktor testApplication + FakeRuntime
+src/test/resources/
+    sample.json                 unchanged
+```
 
-### Key seam: the pool
-
-`WorldgenRuntimePool` exposes only `withRuntime { ... }`. The v1 single-
-runtime version uses a `Mutex`; a future N-runtime version uses a
-`Channel<R>` of pooled instances. `WorldgenService` is unchanged when the
-pool grows.
+This matches the sibling repo `oni-seed-browser-backend`'s house style
+(flat package, top-level functions, no DI container, no separate
+`ErrorMapping`/`Result`/`JsBridge` files).
 
 ## Components
 
-### `wasm/WorldgenRuntime.kt`
+### `JavetWorldgenRuntime.kt`
 
-Interface, ~5 lines.
+Owns the V8 lifecycle, the WASM instantiation, and a `Mutex` that
+serializes generate() calls. The only file that imports Javet.
 
-```kotlin
-interface WorldgenRuntime : AutoCloseable {
-    suspend fun generate(coord: String): String   // trimmed JSON, raw text
-}
-```
+**Constructor (cold start, blocking).** Runs once at process boot.
 
-### `wasm/JavetWorldgenRuntime.kt`
+1. Build a `NodeRuntime` via `V8Host.getNodeInstance().createV8Runtime()`.
+2. Read `worldgen/oni_wasm_bg.wasm` from classpath into a `byte[]` and
+   bind it on `globalThis.wasmBytes` via `V8ValueGlobalObject.set("wasmBytes", bytes)`.
+3. Register an `IV8ModuleResolver` that compiles modules from classpath:
 
-The only file that knows Javet/V8/JS.
+   ```kotlin
+   nodeRuntime.setV8ModuleResolver { runtime, name, _ ->
+       // Resolution rule: any specifier `./X` or `X` maps to the
+       // classpath resource `worldgen/X`. The two specifiers we expect
+       // are `./index.js` (from the bootstrap module) and `./oni_wasm.js`
+       // (from index.js's `import * as _wasm from './oni_wasm.js'`).
+       val basename = name.removePrefix("./")
+       val src = Thread.currentThread().contextClassLoader
+           .getResourceAsStream("worldgen/$basename")
+           ?.use { it.readBytes().decodeToString() }
+           ?: error("Module '$name' not found at classpath:worldgen/$basename")
+       runtime.getExecutor(src)
+           .setResourceName(name)
+           .setModule(true)
+           .compileV8Module()
+   }
+   ```
 
-Constructor:
-1. Read `worldgen/oni_wasm_bg.wasm` from classpath into a `byte[]` and
-   bind it on `globalThis.wasmBytes`.
-2. Register an `IV8ModuleResolver` that resolves `./index.js` and
-   `./oni_wasm.js` from classpath instead of the filesystem.
-3. Run a bootstrap module:
+4. Compile and execute the bootstrap module. Source:
+
    ```js
    import init, { worldgen } from './index.js';
    await init({ module: new WebAssembly.Module(globalThis.wasmBytes) });
-   globalThis.__worldgen = worldgen;
+   globalThis.__generate = function (coord) {
+       const r = worldgen.generate(coord);
+       // Drop typed-array fields BEFORE JSON.stringify; otherwise they
+       // serialize as objects ({"0": v, "1": v, ...}) instead of being
+       // omitted. This is the entire reason for the JS-side strip.
+       delete r.element_table;
+       for (const w of r.worlds) {
+           delete w.element_idx;
+           delete w.mass;
+           delete w.temperature;
+           delete w.disease_idx;
+           delete w.disease_count;
+           delete w.pickupables;
+           for (const cell of w.biome_cells) delete cell.type;
+           for (const g of w.geysers) delete g.cell;
+           for (const e of w.other_entities) delete e.cell;
+           for (const b of w.buildings) {
+               delete b.cell;
+               delete b.connections;
+               delete b.rotationOrientation;
+           }
+       }
+       for (const p of r.starmap_pois) {
+           delete p.capacity_roll;
+           delete p.recharge_roll;
+           delete p.total_capacity;
+           delete p.recharge_time;
+       }
+       return JSON.stringify(r);
+   };
    ```
-   This synchronously instantiates the WASM from in-memory bytes (no
-   `fetch`, no `fs.readFileSync` needed) and parks `worldgen` on a global.
-4. `nodeRuntime.await()` to drain microtasks.
 
-`generate(coord)` runs a small parameterized executor — coord passed via
-a V8 binding, **not** string-concatenated into JS — that calls
-`__worldgen.generate(coord)`, runs the first-pass stripper, returns the
-JSON string.
+   Held as a `private const val` at the top of the file. Executed via
+   `nodeRuntime.getExecutor(BOOTSTRAP_SRC).setResourceName("./bootstrap.mjs")
+   .setModule(true).executeVoid()`.
 
-`close()` disposes the runtime.
+5. `nodeRuntime.await()` to drain pending microtasks (the dynamic
+   `await init(...)`).
+6. Cache a handle to `globalThis.__generate` as a `V8ValueFunction` field
+   on the runtime instance, so per-call invocation skips re-resolving the
+   global.
 
-### `wasm/JsBridge.kt`
-
-Holds the JS source text for the first-pass stripper as a constant. The
-existing logic from `Worldgen.kt` (drop `element_table`, per-world
-`element_idx`/`mass`/`temperature`/`disease_idx`/`disease_count`/
-`pickupables`, biome cell `type`, geyser `cell`, building `cell`/
-`connections`/`rotationOrientation`, starmap POI roll fields) lives here,
-ported into a function rather than concatenated into every call.
-
-It's its own file because the JS is data, not control flow — keeping it
-out of `JavetWorldgenRuntime.kt` keeps that file focused on runtime
-lifecycle.
-
-### `wasm/WorldgenRuntimePool.kt`
+**Public API.**
 
 ```kotlin
-class WorldgenRuntimePool(
-    private val factory: () -> WorldgenRuntime
-) : AutoCloseable {
-    private var runtime = factory()
-    @Volatile private var poisoned = false
+class JavetWorldgenRuntime : AutoCloseable {
     private val mutex = Mutex()
+    // built in init {} as described above
+    private val nodeRuntime: NodeRuntime
+    private val generateFn: V8ValueFunction
 
-    suspend fun <T> withRuntime(block: suspend (WorldgenRuntime) -> T): T =
-        mutex.withLock {
-            if (poisoned) {
-                runtime.close()
-                runtime = factory()
-                poisoned = false
-            }
-            block(runtime)
-        }
+    /** coord in, trimmed JSON out. Serialized via internal mutex. */
+    suspend fun generate(coord: String): String =
+        mutex.withLock { generateFn.invokeString(coord) }
 
-    fun markPoisoned() { poisoned = true }
-
-    override fun close() = runtime.close()
+    override fun close() {
+        nodeRuntime.setPurgeEventLoopBeforeClose(true)
+        generateFn.close()
+        nodeRuntime.close()
+    }
 }
 ```
 
-The N-runtime version replaces `mutex + runtime` with a
-`Channel<WorldgenRuntime>` of size N and keeps the same public API.
+`invokeString(coord)` passes the coordinate as a real V8 string argument
+— there is no JavaScript-source string concatenation anywhere, which
+removes the JS-injection shape that the current `Worldgen.kt:33` has.
 
-### `worldgen/Postprocessor.kt`
+**The pool seam, revisited.** The single-runtime case does not need a
+separate `Pool` class — the `Mutex` lives on the runtime itself. When v2
+needs N runtimes, the change is: extract `interface WorldgenRuntime`
+(one method, `suspend fun generate(coord: String): String`), make today's
+class implement it, add a `WorldgenRuntimePool` with a `Channel<R>`. All
+call sites change from `runtime.generate(coord)` to
+`pool.withRuntime { it.generate(coord) }`. That is two files added and
+two call sites edited. We are not paying for that abstraction in v1.
 
-Pure JVM, no Javet dependency.
+### `WorldgenService.kt`
 
-- Parses raw JSON to the `Cluster` type from `oniSeedBrowserModel` using
-  `kotlinx.serialization` configured with `ignoreUnknownKeys = true`
-  (forward-compat across WASM bundle updates).
-- Drops the small per-element fields the JS strip didn't handle, by
-  operating on the typed model rather than string surgery.
-- Returns `Cluster`. Serializing it back to JSON is the route's job
-  (Ktor `ContentNegotiation`).
-
-### `worldgen/WorldgenService.kt`
+Orchestration: validate, enforce a wall-clock timeout, call the runtime,
+classify failures. Defines the `WorldgenError` sealed type next to the
+service that produces it.
 
 ```kotlin
+sealed class WorldgenError(val code: String, message: String) : Throwable(message) {
+    class InvalidCoordinate(val coord: String) :
+        WorldgenError("INVALID_COORDINATE", "Coordinate '$coord' is not syntactically valid")
+    class WasmFailure(val coord: String, detail: String?) :
+        WorldgenError("WASM_FAILURE", "WASM rejected coordinate '$coord': $detail")
+    class Timeout(val coord: String, val after: Duration) :
+        WorldgenError("TIMEOUT", "Worldgen exceeded $after for coordinate '$coord'")
+}
+
 class WorldgenService(
-    private val pool: WorldgenRuntimePool,
-    private val postprocessor: Postprocessor,
+    private val generator: suspend (String) -> String,
     private val timeout: Duration = 30.seconds,
 ) {
-    suspend fun generate(coord: String): Result<Cluster, WorldgenError> {
+    suspend fun generate(coord: String): Result<String> {
         if (!ClusterType.isValidCoordinate(coord))
-            return Err(InvalidCoordinate(coord))
+            return Result.failure(WorldgenError.InvalidCoordinate(coord))
         return try {
-            withTimeout(timeout) {
-                pool.withRuntime { rt -> postprocessor.shape(rt.generate(coord)) }
-            }.let(::Ok)
+            Result.success(withTimeout(timeout) { generator(coord) })
         } catch (e: TimeoutCancellationException) {
-            pool.markPoisoned()
-            Err(Timeout(coord, timeout))
+            Result.failure(WorldgenError.Timeout(coord, timeout))
         } catch (e: JavetException) {
-            Err(WasmFailure(coord, e.message))
-        } catch (e: SerializationException) {
-            Err(BridgeFailure("postprocess", e.message))
+            Result.failure(WorldgenError.WasmFailure(coord, e.message))
         }
     }
 }
 ```
 
-`Result`/`Ok`/`Err` is a tiny in-house sealed type — avoids pulling Arrow
-for one usage site.
+Uses `kotlin.Result<String>` rather than an in-house Either/sum type — one
+call site does not justify a custom result wrapper. `WorldgenError` is a
+`Throwable` so `Result.failure(...)` works directly.
 
-### `worldgen/WorldgenError.kt`
+**Why `generator` is a function reference, not a typed `Runtime`
+parameter.** `WorldgenService` only needs to call one method. Taking a
+`suspend (String) -> String` instead of a class:
+
+- removes any need for an interface introduced "for testability"
+  (production wires `WorldgenService(runtime::generate)`; tests wire
+  `WorldgenService { coord -> "fake" }`);
+- keeps the dependency direction explicit — the service knows nothing
+  about V8 or pools, and never will;
+- when v2 swaps the single runtime for a pool, the wiring becomes
+  `WorldgenService { coord -> pool.withRuntime { it.generate(coord) } }`
+  — the service still doesn't know.
+
+**`InvalidCoordinate` covers syntax only.** `ClusterType.isValidCoordinate`
+in `oni-seed-browser-model` is regex-based; it accepts strings the WASM
+will still reject as nonsense seeds. Those land in `WasmFailure`.
+
+**`WasmFailure` covers two distinct cases:** Rust panics (a real bug in
+WASM or a corrupted build) and "syntactically valid coordinate that the
+WASM refuses." We don't try to distinguish; from the caller's point of
+view both are "the WASM said no."
+
+### `Routings.kt`
+
+Adds one route. Maps `WorldgenError` to HTTP inline — it's a 10-line
+`when`, no separate file.
 
 ```kotlin
-sealed class WorldgenError(val code: String) {
-    data class InvalidCoordinate(val coord: String) : WorldgenError("INVALID_COORDINATE")
-    data class Timeout(val coord: String, val after: Duration) : WorldgenError("TIMEOUT")
-    data class WasmFailure(val coord: String, val detail: String?) : WorldgenError("WASM_FAILURE")
-    data class BridgeFailure(val stage: String, val detail: String?) : WorldgenError("BRIDGE_FAILURE")
-}
-```
+@Serializable
+data class ErrorBody(val code: String, val message: String, val coordinate: String? = null)
 
-### `http/Routings.kt`
-
-```kotlin
 fun Application.configureRouting(service: WorldgenService) {
     install(CORS) { /* unchanged from current */ }
+    install(ContentNegotiation) { json() }
     routing {
-        get("/")                 { call.respondText("ONI seed contributor $VERSION ...") }
+        get("/") { call.respondText("ONI seed contributor $VERSION ...") }
         get("/generate/{coord}") {
             val coord = call.parameters["coord"]!!
-            when (val r = service.generate(coord)) {
-                is Ok  -> call.respond(r.value)         // ContentNegotiation serializes Cluster
-                is Err -> respondError(call, r.error)
-            }
+            service.generate(coord)
+                .onSuccess { call.respondText(it, ContentType.Application.Json) }
+                .onFailure { e -> respondWorldgenError(call, e) }
         }
     }
 }
+
+private suspend fun respondWorldgenError(call: ApplicationCall, e: Throwable) {
+    val (status, body) = when (e) {
+        is WorldgenError.InvalidCoordinate -> HttpStatusCode.BadRequest to
+            ErrorBody(e.code, e.message!!, e.coord)
+        is WorldgenError.Timeout           -> HttpStatusCode.GatewayTimeout to
+            ErrorBody(e.code, e.message!!, e.coord)
+        is WorldgenError.WasmFailure       -> HttpStatusCode.BadGateway to
+            ErrorBody(e.code, e.message!!, e.coord)
+        else                               -> HttpStatusCode.InternalServerError to
+            ErrorBody("UNEXPECTED", e.message ?: e::class.simpleName.orEmpty())
+    }
+    call.respond(status, body)
+}
 ```
 
-### `http/ErrorMapping.kt`
-
-Single function `respondError` that maps `WorldgenError` to
-`(HttpStatusCode, ErrorBody)` and responds.
-
-```kotlin
-@Serializable data class ErrorBody(
-    val code: String,
-    val message: String,
-    val coordinate: String? = null,
-)
-```
+`respondText(it, ContentType.Application.Json)` ships the raw string from
+the WASM directly as the response body — no re-parse, no re-stringify.
 
 ### `Application.kt`
 
 ```kotlin
 fun main() {
-    val pool = WorldgenRuntimePool { JavetWorldgenRuntime() }
-    val service = WorldgenService(pool, Postprocessor())
+    val runtime = JavetWorldgenRuntime()
+    val service = WorldgenService(runtime::generate, timeout = envTimeout())
 
-    Runtime.getRuntime().addShutdownHook(Thread { pool.close() })
+    Runtime.getRuntime().addShutdownHook(Thread { runtime.close() })
 
-    embeddedServer(Netty, port = 8080, host = "0.0.0.0") { module(service) }
-        .start(wait = true)
+    embeddedServer(Netty, port = envPort(), host = "0.0.0.0") {
+        configureRouting(service)
+    }.start(wait = true)
 }
 
-fun Application.module(service: WorldgenService) = configureRouting(service)
+private fun envTimeout() = (System.getenv("WORLDGEN_TIMEOUT_SECONDS")?.toIntOrNull() ?: 30).seconds
+private fun envPort()    = System.getenv("WORLDGEN_PORT")?.toIntOrNull() ?: 8080
 ```
 
 The side-effecting `Worldgen.generate(...)` debug call before
-`embeddedServer` in the current code is removed.
+`embeddedServer` in the current code is removed. No `WORLDGEN_RUNTIME_POOL_SIZE`
+env var — it would do nothing in v1.
 
 ## Data Flow
 
-### Cold start (once, at process boot)
+### Cold start (once)
 
-1. `main()` constructs `WorldgenRuntimePool { JavetWorldgenRuntime() }`.
-2. `JavetWorldgenRuntime.<init>` blocks while it spins up the
-   `NodeRuntime`, registers the classpath module resolver, runs the
-   bootstrap module, parks `worldgen` on `globalThis.__worldgen`, and
-   awaits pending microtasks.
-3. The runtime is "warm" — every `generate` call reuses the same parsed
-   JS modules and the same instantiated WASM. No re-init per request.
-4. Ktor binds `:8080`. First request can already be served.
+1. `main()` constructs `JavetWorldgenRuntime()`.
+2. Constructor blocks for ~1–3 s while it boots `NodeRuntime`, registers
+   the classpath module resolver, runs the bootstrap module, drains
+   microtasks, and caches the `__generate` function handle.
+3. Ktor binds `:8080`. First request can already be served without
+   further warmup.
 
-### Hot path (per request)
+### Hot path
 
 ```
 HTTP GET /generate/PRE-C-719330309-0-0-ZB937
    │
    ▼  Ktor coroutine on Netty's IO dispatcher
-configureRouting → service.generate(coord)
+service.generate(coord)
    │
-   ▼  validate coord syntactically (zero V8)
-ClusterType.isValidCoordinate(coord)?  ── no ──► Err(InvalidCoordinate) ──► 400
-   │ yes
+   ▼  validate (pure regex via ClusterType.isValidCoordinate)
+   │  ── invalid ──► Result.failure(InvalidCoordinate) ──► 400
+   │  valid
    ▼  withTimeout(30s) {
-pool.withRuntime { rt ->
-   │  mutex.withLock — at most one V8 call in flight
-   ▼
-JavetWorldgenRuntime.generate(coord)
-   │  • bind coord as a V8 string parameter (no string concat into JS)
-   │  • run the pre-loaded JS:
-   │       const r = __worldgen.generate(coord);
-   │       firstPassStrip(r);                       // drops bulky per-cell arrays
-   │       return JSON.stringify(r);
+runtime.generate(coord)
+   │  └─ mutex.withLock { generateFn.invokeString(coord) }
+   │     • coord is a real V8 string parameter
+   │     • the JS function calls worldgen.generate(coord),
+   │       deletes typed-array fields, then JSON.stringify
    ▼
 String                                            (~tens-to-hundreds of KB)
    │
-   ▼  back in Kotlin, still inside withRuntime
-Postprocessor.shape(rawJson)
-   │  • Json.decodeFromString<Cluster>(rawJson) using oniSeedBrowserModel
-   │  • drop small per-element fields the JS strip didn't touch
-   ▼
-Cluster                                            (typed)
+   ▼  }
+Result.success(String)
    │
-   ▼ }                                              mutex released
-Ok(Cluster)
-   │
-   ▼  Ktor ContentNegotiation
-serialize Cluster → application/json → 200
+   ▼  respondText(it, application/json) → 200
 ```
 
 ### Failure branches
 
-- WASM throws (panic, bad coord that survived the syntactic check) →
-  `JavetException` bubbles out → `WasmFailure` → 502.
-- 30 s deadline elapses → `withTimeout` cancels the coroutine; the
-  in-flight V8 call keeps running until completion. Pool is marked
-  `poisoned`; the next `withRuntime` rebuilds it. Caller sees `Timeout` →
-  504.
-- Result JSON doesn't deserialize to `Cluster` →
-  `BridgeFailure("postprocess", ...)` → 500. (Indicates schema drift
-  between WASM bundle and `oniSeedBrowserModel`.)
+- WASM throws (panic; or syntactically valid coord WASM refuses) →
+  `JavetException` → `WasmFailure` → **502**.
+- Wall-clock > timeout → `TimeoutCancellationException` → `Timeout` → **504**.
+- Anything else (programming bug) → catch-all → **500** with code `UNEXPECTED`.
 
 ### Concurrency contract
 
 - `WorldgenService.generate` is `suspend` and safe to call from many
   request coroutines simultaneously.
-- `pool.withRuntime` serializes V8 access. Today: request N waits for
-  request N-1. When pooling lands, contention drops to 1/N; service code
-  unchanged.
-- Backpressure beyond OS socket queues is out of scope for v1.
+- The mutex inside the runtime serializes V8 access. Today: request N
+  waits for request N-1.
+- When v2 introduces a pool, the call sites change but the contract
+  doesn't. Backpressure beyond OS socket queues is out of scope.
+
+### Timeout interaction (no poison/rebuild)
+
+`withTimeout` cancels the *coroutine*, not the V8 call. The V8 call
+keeps running on its native thread until it returns; while that's in
+flight, the mutex is still held. The next request then waits for the
+slow coordinate to finish, *then* runs.
+
+This is intentional. The previous revision proposed a "poison + rebuild"
+mechanism: mark the runtime poisoned on timeout, rebuild on the next
+acquire. Two reasons we cut it for v1:
+
+- **Cost is wrong direction.** Rebuild costs ~1–3 s; the timeout already
+  cost the user 30 s. Adding a second cost in front of unrelated traffic
+  is worse than letting the slow call drain.
+- **`terminateExecution` doesn't reach WASM.** Javet exposes
+  `nodeRuntime.terminateExecution()`, but it cannot interrupt a
+  running WASM call — only JS code between WASM calls. So even with
+  poison-and-rebuild, the runaway thread keeps consuming CPU until
+  natural exit. Rebuild only frees the mutex slot; it doesn't free the
+  thread.
+
+If timeouts become a real operational problem, the v2 fix is N runtimes
+(N>1 means a slow one doesn't block all traffic) or a hard process kill
+(let an orchestrator restart us). Both are bigger changes than v1.
 
 ## Error Handling
 
 ### Principle
 
-Errors are values once they cross the `WorldgenService` boundary. Inside
-the service we catch dependency exceptions; outside, only
-`Result<Cluster, WorldgenError>` flows. Routes never see raw Javet or
-serialization exceptions.
+Errors are values once they cross the `WorldgenService` boundary. The
+service catches exception types from its dependencies; outside, only
+`Result<String>` (where `failure` carries a `WorldgenError`) flows. The
+route maps to HTTP and never sees raw Javet exceptions.
 
 ### Variants
 
 | Variant | Triggered by | HTTP | Body `code` | Retryable? |
 |---|---|---|---|---|
-| `InvalidCoordinate` | fails `ClusterType.isValidCoordinate` | 400 | `INVALID_COORDINATE` | No — drop from queue |
+| `InvalidCoordinate` | regex check on the coordinate fails | 400 | `INVALID_COORDINATE` | No — drop from queue |
 | `Timeout` | wall-clock > configured deadline | 504 | `TIMEOUT` | Yes — but mark coord flaky |
-| `WasmFailure` | `JavetException`, including JS-side throws and Rust panics | 502 | `WASM_FAILURE` | Maybe — once, then drop |
-| `BridgeFailure` | postprocess deserialization or any Kotlin-side bug | 500 | `BRIDGE_FAILURE` | No — operator alert |
+| `WasmFailure` | `JavetException`, including JS-side throws, Rust panics, *and* "valid syntax / nonsense seed" | 502 | `WASM_FAILURE` | Maybe — once, then drop |
+| (catch-all) | unexpected exception (bug) | 500 | `UNEXPECTED` | No — operator alert |
 
 ### Response body
 
 ```json
 {
   "code": "TIMEOUT",
-  "message": "Worldgen exceeded 30s for coordinate PRE-C-...-ZB937",
+  "message": "Worldgen exceeded 30s for coordinate 'PRE-C-...-ZB937'",
   "coordinate": "PRE-C-...-ZB937"
 }
 ```
 
-Stable shape across all error variants. `code` is the machine-readable
-switch; `message` is human-readable; `coordinate` is included when known.
+Stable across all error variants. `code` is the machine-readable switch.
 
-### Layer responsibilities
-
-- `JavetWorldgenRuntime.generate` lets Javet throw freely. It does not
-  classify failures; classification is the service's job.
-- `WorldgenService.generate` is the only place that turns exceptions into
-  `WorldgenError`.
-- `respondError` is the only place that turns `WorldgenError` into HTTP.
-
-### Logging policy
+### Logging
 
 - `InvalidCoordinate`: INFO. Cheap, expected.
 - `Timeout`: WARN with coordinate + duration.
-- `WasmFailure`: WARN with coordinate + Javet message; stack at DEBUG.
-- `BridgeFailure`: ERROR with full stack — schema drift or our bug.
-
-### Runtime poisoning
-
-When `withTimeout` fires, the in-flight V8 call keeps running on its
-thread until it completes. The runtime slot is therefore in unknown
-state. The pool marks it `poisoned`, releases the mutex; the *next*
-`withRuntime` closes and rebuilds before yielding. Cost: one cold-start
-hits the request that follows a timeout. Acceptable trade vs. trying to
-abort a synchronous V8 call.
-
-### Explicit non-behaviors
-
-- No retry inside the service. Orchestrator owns retry policy.
-- No cache. Each call is a fresh worldgen.
-- No errors-as-200s. HTTP status is honest.
+- `WasmFailure`: WARN with coordinate + Javet message; full stack at DEBUG.
+- catch-all: ERROR with full stack.
 
 ## Testing
 
-### Unit — `Postprocessor` (pure JVM)
+### Unit — `WorldgenService` with a fake generator
 
-- Drives off `src/test/resources/sample.json` plus a couple of malformed
-  variants.
-- Asserts: dropped fields are absent, retained fields present, `Cluster`
-  round-trips through `Json.encodeToString` cleanly.
-- A schema-drift fixture (extra unknown field) confirms `ignoreUnknownKeys`
-  survives WASM-side additions.
-- Milliseconds, no Javet, no native libs.
+The service takes a `suspend (String) -> String`, so the test double is
+just a lambda — no fake class, no interface. Cases:
 
-### Unit — `WorldgenService` with a fake runtime
+- happy path → `WorldgenService { _ -> "{...}" }` → `Result.success("{...}")`
+- WASM throws → `WorldgenService { _ -> throw JavetException(...) }` →
+  `Result.failure(WasmFailure)`
+- runtime blocks → `WorldgenService { delay(60.seconds); "" }` with a
+  short timeout → `Result.failure(Timeout)`
+- bad coord → service short-circuits, lambda never invoked
+  (assert via a counter inside the lambda)
 
-`FakeRuntime : WorldgenRuntime` returns canned strings or throws on
-demand. Cases:
-- happy path → `Ok(Cluster)`
-- runtime throws `JavetException` → `Err(WasmFailure)`
-- runtime blocks longer than configured timeout → `Err(Timeout)` and
-  pool's `markPoisoned()` was called
-- postprocessor sees malformed JSON → `Err(BridgeFailure)`
-- bad coordinate string → `Err(InvalidCoordinate)`, runtime never invoked
-
-### Unit — `WorldgenRuntimePool`
-
-- 5 concurrent `withRuntime` callers; assert observed concurrency = 1.
-- After `markPoisoned()`, next `withRuntime` invokes the factory again
-  (factory wrapped to count calls).
-
-### Integration — real bridge
+### Integration — real bridge, gated
 
 `JavetWorldgenRuntimeTest` boots a real `JavetWorldgenRuntime`, calls
-`generate("PRE-C-719330309-0-0-ZB937")`, asserts the result deserializes
-to a `Cluster` with expected world count, expected coordinate echoed
-back, and presence of expected biomes. Structural assertions only — no
-byte-for-byte match (fragile across WASM versions). The existing
-commented-out assertion in `WorldgenTest.kt` stays commented.
+`generate("PRE-C-719330309-0-0-ZB937")`, and asserts:
 
-Tagged `wasm` so `gradle test -PexcludeTags=wasm` can skip on
-constrained platforms. Default `gradle test` runs them.
+- the result is a non-empty JSON string
+- the result does **not** contain `"\"0\":"` patterns from typed-array
+  serialization (regression guard against the typed-array
+  `JSON.stringify` foot-gun — if the JS strip ever stops running before
+  stringify, this catches it loudly)
+- the result parses successfully via the frontend's actual converter:
+
+  ```kotlin
+  val mapData = WorldgenMapData.fromJson(result)
+  val cluster = WorldgenMapDataConverter.convert(mapData, gameVersion = 0)
+  assertEquals(coord, cluster.coordinate)
+  assertTrue(cluster.asteroids.isNotEmpty())
+  ```
+
+  This is the strongest cheap assertion that what we produce matches what
+  the rest of the ecosystem consumes. `WorldgenMapData` and
+  `WorldgenMapDataConverter` currently live in `oni-seed-browser`'s
+  commonMain — copy them into `src/test/kotlin/` (they're small) rather
+  than introducing a build-time dependency on the frontend module. Mark
+  the copies with a comment pinning their source commit and the npm
+  package version.
+
+Tagged `wasm` so `gradle test -PexcludeTags=wasm` skips on constrained
+platforms. Default `gradle test` runs them.
 
 ### End-to-end — Ktor route
 
-`testApplication { client.get("/generate/...") }` driving a service
-backed by `FakeRuntime`. Confirms route plumbing, content negotiation,
-and error mapping (one `400`/`504`/`502`/`500` case each via
-fake-induced failures). No real WASM in the loop.
+`testApplication { client.get("/generate/...") }` driving a service backed
+by a fake runtime. Confirms route plumbing, CORS, content type, and error
+mapping (one each of 400 / 504 / 502 / 500 via fake-induced failures).
+No real WASM in the loop.
 
 ### Out of scope
 
 WASM correctness (upstream's job), long-running stability/leak tests
-(manual pre-deploy), concurrency stress beyond the pool's serialization
+(manual pre-deploy), concurrency stress beyond the mutex's serialization
 invariant.
 
 ### CI
 
 `./gradlew test` runs everything on Linux x86_64 (GH Actions). The
-Dockerfile already does `RUN ./gradlew --no-daemon --info test
-buildFatJar`, so the integration test runs as part of the image build.
-Provided the Linux Javet native is on the classpath — a packaging concern,
-below.
+Dockerfile already does `RUN ./gradlew --no-daemon --info test buildFatJar`,
+so the integration test runs as part of the image build. Provided the
+Linux Javet native is on the classpath — see Operations below.
 
-## Operational Concerns
+## Operations
 
-### Javet native libraries
+### Javet native libraries — must fix before deploy
 
 Today `build.gradle.kts` declares only `javet-node-windows-x86_64`. The
-Dockerfile builds an `eclipse-temurin:25-jre-alpine` image; Javet does
-**not** ship a musl-libc native, so the JAR will fail to load `libnode`
-on Alpine.
+current `Dockerfile` builds an `eclipse-temurin:25-jre-alpine` image;
+Javet does **not** ship a musl-libc native, so the JAR will fail to load
+`libnode` on Alpine.
 
 Required changes:
-- Add `javet-node-linux-x86_64` and `javet-node-linux-arm64` (CI builds
-  both). Keep `javet-node-windows-x86_64` for dev. All three can ship in
-  the fat jar (a few MB per native).
+
+- Add `javet-node-linux-x86_64` and `javet-node-linux-arm64` to the
+  version catalog (CI builds both architectures). Keep the Windows native
+  for dev. All three can ship in the fat jar (a few MB per native).
 - Switch the runtime base from `eclipse-temurin:25-jre-alpine` to
   `eclipse-temurin:25-jre` (Debian-slim). Costs ~30 MB image size, gains
   glibc.
-- At process start, log Javet's resolved native path. If load fails, log
-  *which* artifact is missing.
+- At process start, log `V8Host.getNodeInstance().isLibraryReloadable`
+  and the resolved native library path. If load fails, the message
+  should make clear *which* artifact is missing, not just "library not
+  found."
 
 ### Build dependency
 
-The bootstrap module loads `index.js` and `oni_wasm.js` as ES modules
-via the registered `IV8ModuleResolver`, reading them as strings from
-classpath resources. **No JS toolchain (npm/webpack) is needed** — the
-prebuilt files already in `src/main/resources/worldgen/` ship as-is.
+The runtime loads `index.js` and `oni_wasm.js` as ES modules via the
+registered `IV8ModuleResolver`, reading them as strings from classpath
+resources. **No JS toolchain (npm/webpack) is needed** — the prebuilt
+files already in `src/main/resources/worldgen/` ship as-is.
 
 ### Memory
 
-A warm `NodeRuntime` + instantiated WASM sits at ~150–250 MB resident.
-Single instance v1 fits in a 512 MB container. Pool growth is linear;
-document in README.
+A warm `NodeRuntime` plus instantiated WASM measures ~150 MB resident at
+idle but rises to ~300–500 MB under load (V8 heap growth, transient
+buffers from each `generate` call, large per-cell arrays alive within
+the JS function before stripping). A 512 MB container is tight; a 1 GB
+container is comfortable. The future N-runtime pool will not scale
+linearly here either — each runtime has its own V8 heap. Measure before
+spec'ing pool size.
 
 ### Configuration
 
-Three env vars, all read in `Application.kt` via `System.getenv`:
+Two env vars, read in `Application.kt` via `System.getenv`:
+
 - `WORLDGEN_TIMEOUT_SECONDS` (default `30`)
 - `WORLDGEN_PORT` (default `8080`)
-- `WORLDGEN_RUNTIME_POOL_SIZE` (default `1`; reserved for future, ignored
-  today)
 
-No config file. No DI container.
+No config file. No DI container. No reserved-but-unused vars.
 
 ### Shutdown
 
-JVM shutdown hook closes the pool, which closes the runtime, which
-disposes V8. Without this, Javet's native threads can keep the JVM alive.
+JVM shutdown hook calls `runtime.close()`. The close path sets
+`nodeRuntime.setPurgeEventLoopBeforeClose(true)` first — without it,
+pending Node tasks can keep the JVM alive past process shutdown.
 
 ### Observability v1
 
-Existing logback + `println`-style logging in `Routings.kt` is fine. Add:
+Existing logback + `println`-style logging is fine. Add:
+
 - per-request log line with coord, outcome, duration ms
 - WARN/ERROR levels for failure variants per "Error Handling" above
 - `GET /` keeps reporting version + uptime
@@ -531,46 +605,38 @@ No Prometheus/metrics endpoint in v1; bolt on later via
 
 ## Migration from current code
 
-Three files survive in spirit, none survive byte-for-byte:
-
-- `Worldgen.kt` → split into `wasm/JavetWorldgenRuntime.kt` and
-  `wasm/JsBridge.kt`. The `// TODO` block is replaced by the bootstrap
-  module described in "Components".
+- `Worldgen.kt` → renamed and rewritten as `JavetWorldgenRuntime.kt`. The
+  `// TODO` block becomes the bootstrap module described above. The
+  inline string-concatenated post-strip is gone — it's the JS function
+  installed at boot.
 - `Application.kt` loses the side-effecting `Worldgen.generate(...)`
-  debug call before `embeddedServer`. Gains composition root wiring and
+  debug call before `embeddedServer`. Gains composition wiring and the
   shutdown hook.
-- `Routings.kt` loses nothing; gains `/generate/{coord}` and now takes
-  `WorldgenService` as a parameter.
+- `Routings.kt` gains `/generate/{coord}` and `respondWorldgenError`,
+  and now takes `WorldgenService` as a parameter.
+- `WorldgenService.kt` is new.
+- No new packages. Files stay flat in `src/main/kotlin/` to match
+  `oni-seed-browser-backend`'s house style.
 
-## File map (final)
+## Final file map
 
 ```
 src/main/kotlin/
     Application.kt
-    Result.kt                  (in-house Ok/Err sealed type)
-    wasm/
-        WorldgenRuntime.kt
-        JavetWorldgenRuntime.kt
-        JsBridge.kt
-        WorldgenRuntimePool.kt
-    worldgen/
-        WorldgenService.kt
-        WorldgenError.kt
-        Postprocessor.kt
-    http/
-        Routings.kt
-        ErrorMapping.kt
+    Routings.kt
+    WorldgenService.kt
+    JavetWorldgenRuntime.kt
 src/main/resources/
     logback.xml
-    worldgen/                  (unchanged: index.js, oni_wasm.js, oni_wasm_bg.wasm, ...)
+    worldgen/                 (unchanged: index.js, oni_wasm.js, oni_wasm_bg.wasm, ...)
 src/test/kotlin/
-    PostprocessorTest.kt
     WorldgenServiceTest.kt
-    WorldgenRuntimePoolTest.kt
-    JavetWorldgenRuntimeTest.kt    (tag: wasm)
+    JavetWorldgenRuntimeTest.kt    (tag: wasm; copies WorldgenMapData + WorldgenMapDataConverter)
     RoutingsTest.kt
 src/test/resources/
-    sample.json                (unchanged)
-    sample-malformed.json
-    sample-with-unknown-field.json
+    sample.json               (unchanged)
 ```
+
+Four files under `src/main/kotlin/`, three test files. No interfaces, no
+sealed `Result` wrapper, no `ErrorMapping`/`JsBridge`/`Postprocessor`
+files, no DI container.
