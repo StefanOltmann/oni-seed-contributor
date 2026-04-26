@@ -85,10 +85,12 @@ dependencies {
     /* Domain model */
     implementation(libs.oniSeedBrowserModel)
 
-    /* Javet — core + per-platform natives.
+    /*
+     * Javet — core + per-platform natives.
      * The Windows native is needed for local dev; the two Linux natives
      * are needed for the Docker image (amd64 + arm64 from CI). All three
-     * are runtimeOnly so they don't appear on the compile classpath. */
+     * are runtimeOnly so they don't appear on the compile classpath.
+     */
     implementation(libs.javet.core)
     runtimeOnly(libs.javet.windows)
     runtimeOnly(libs.javet.linux.amd64)

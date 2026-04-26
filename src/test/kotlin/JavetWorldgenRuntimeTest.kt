@@ -18,17 +18,18 @@
 import kotlinx.coroutines.test.runTest
 import org.junit.Assume
 import org.junit.Before
-import worldgen.WorldgenMapData
-import worldgen.WorldgenMapDataConverter
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-private const val COORD = "PRE-C-719330309-0-0-ZB937"
+private const val COORDINATE = "PRE-C-719330309-0-0-ZB937"
 
 class JavetWorldgenRuntimeTest {
+
+    private val jsonTestData = JavetWorldgenRuntimeTest::class.java.getResourceAsStream("sample.json")!!
+        .readAllBytes()
+        .decodeToString()
 
     private lateinit var runtime: JavetWorldgenRuntime
 
@@ -47,45 +48,13 @@ class JavetWorldgenRuntimeTest {
     }
 
     @Test
-    fun `generate returns a non-empty JSON string`() = runTest {
-        val raw = runtime.generate(COORD)
-        assertTrue(raw.isNotBlank(), "expected non-empty JSON")
-        assertTrue(raw.startsWith("{"), "expected JSON object, got: ${raw.take(80)}")
-    }
+    fun testGenerateForSample() = runTest {
 
-    @Test
-    fun `result has no typed-array object form leaks`() = runTest {
-        // If the JS strip ever runs AFTER JSON.stringify (or stops
-        // running at all), per-cell typed arrays serialize as objects:
-        // {"0":12,"1":34,...}. Catch that loudly.
-        val raw = runtime.generate(COORD)
-        assertFalse(
-            raw.contains("\"0\":") && raw.contains("\"1\":"),
-            "found typed-array object-form artifacts; JS strip likely ran after JSON.stringify"
+        val raw = runtime.generate(COORDINATE) + "\n"
+
+        assertEquals(
+            expected = jsonTestData,
+            actual = raw
         )
-    }
-
-    @Test
-    fun `result round-trips through frontend WorldgenMapDataConverter`() = runTest {
-        val raw = runtime.generate(COORD)
-
-        // The vendored WorldgenMapData.fromJson uses ignoreUnknownKeys=false
-        // (strict). The WASM bundle frequently grows fields the model doesn't
-        // know about — drift between the npm package and the vendored model
-        // is expected and not a regression. Use a tolerant decoder for the
-        // *structural* round-trip; the typed-array leak test (above) is
-        // what guards the strip behaviour.
-        val tolerantJson = kotlinx.serialization.json.Json {
-            ignoreUnknownKeys = true
-            isLenient = true
-        }
-        val mapData = tolerantJson.decodeFromString(
-            kotlinx.serialization.serializer<WorldgenMapData>(),
-            raw
-        )
-        val cluster = WorldgenMapDataConverter.convert(mapData, gameVersion = 0)
-
-        assertEquals(COORD, cluster.coordinate)
-        assertTrue(cluster.asteroids.isNotEmpty(), "expected at least one asteroid in cluster")
     }
 }

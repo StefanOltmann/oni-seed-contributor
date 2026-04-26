@@ -48,7 +48,9 @@ class WorldgenService(
     private val timeout: Duration = 30.seconds,
     private val onTimeout: (coord: String) -> Unit = ::scheduleSelfTermination,
 ) {
+
     suspend fun generate(coord: String): Result<String> {
+
         if (!ClusterType.isValidCoordinate(coord))
             return Result.failure(WorldgenError.InvalidCoordinate(coord))
         return try {
@@ -92,7 +94,10 @@ class WorldgenService(
 private val terminationScheduled = java.util.concurrent.atomic.AtomicBoolean(false)
 
 private fun scheduleSelfTermination(coord: String) {
-    if (!terminationScheduled.compareAndSet(false, true)) return
+
+    if (!terminationScheduled.compareAndSet(false, true))
+        return
+
     Thread {
         // 2s safety margin. The 504 is typically on the wire in <50 ms
         // (Ktor's Netty backend writes synchronously inside `call.respond`),

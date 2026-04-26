@@ -16,17 +16,6 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-//
-// VENDORED FROM oni-seed-browser (commonMain/worldgen/) — verbatim copy.
-// Source repo: https://github.com/StefanOltmann/oni-seed-browser
-// Pinned to onimaxxing npm package version 2.0.1
-// (matches src/main/resources/worldgen/package.json).
-//
-// Test-only. If oni-seed-browser-model ever absorbs WorldgenMapData,
-// delete these copies and switch to that dependency.
-//
-package worldgen
-
 import de.stefan_oltmann.oni.model.ClusterType
 import de.stefan_oltmann.oni.model.GeyserType
 import de.stefan_oltmann.oni.model.SpacedOutSpacePOI
@@ -37,6 +26,10 @@ import de.stefan_oltmann.oni.model.serializer.GeyserTypeStringSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+
+/*
+ * Verbatim copy from oni-seed-browser
+ */
 
 /*
  * This is the Kotlin data model equivalent of

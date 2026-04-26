@@ -16,17 +16,6 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-//
-// VENDORED FROM oni-seed-browser (commonMain/worldgen/) — verbatim copy.
-// Source repo: https://github.com/StefanOltmann/oni-seed-browser
-// Pinned to onimaxxing npm package version 2.0.1
-// (matches src/main/resources/worldgen/package.json).
-//
-// Test-only. If oni-seed-browser-model ever absorbs WorldgenMapData,
-// delete these copies and switch to that dependency.
-//
-package worldgen
-
 import de.stefan_oltmann.oni.model.Asteroid
 import de.stefan_oltmann.oni.model.AsteroidType
 import de.stefan_oltmann.oni.model.Cluster
@@ -41,6 +30,10 @@ import de.stefan_oltmann.oni.model.StarMapEntryVanilla
 import de.stefan_oltmann.oni.model.WorldTrait
 import de.stefan_oltmann.oni.model.ZoneType
 import kotlin.math.round
+
+/*
+ * Verbatim copy from oni-seed-browser
+ */
 
 object WorldgenMapDataConverter {
 
