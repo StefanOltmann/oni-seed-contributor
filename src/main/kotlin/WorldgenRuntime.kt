@@ -34,7 +34,7 @@ import kotlin.time.Duration.Companion.seconds
  * Cold-start cost: ~1-3s while the constructor runs. Memory: ~150 MB at
  * idle, 300-500 MB under load.
  */
-class JavetWorldgenRuntime : AutoCloseable {
+object WorldgenRuntime : AutoCloseable {
 
     private val nodeRuntime: NodeRuntime = V8Host.getNodeInstance().createV8Runtime()
     private val generateFn: V8ValueFunction
@@ -56,6 +56,7 @@ class JavetWorldgenRuntime : AutoCloseable {
             //    raw ByteArray leaves an opaque Java reference that
             //    `new WebAssembly.Module(...)` rejects).
             val wasmBytes = loadClasspathBytes("worldgen/oni_wasm_bg.wasm")
+
             nodeRuntime.createV8ValueArrayBuffer(wasmBytes.size).use { buf: V8ValueArrayBuffer ->
                 buf.fromBytes(wasmBytes)
                 nodeRuntime.globalObject.set("wasmBytes", buf)
@@ -66,9 +67,12 @@ class JavetWorldgenRuntime : AutoCloseable {
             //    compilation, when the bootstrap's `import` statements
             //    are encountered.
             nodeRuntime.setV8ModuleResolver { runtime, name, _ ->
+
                 val basename = name.removePrefix("./")
+
                 val src = loadClasspathString("worldgen/$basename")
                     ?: error("Module '$name' not found at classpath:worldgen/$basename")
+
                 runtime.getExecutor(src)
                     .setResourceName(name)
                     .setModule(true)
@@ -113,6 +117,7 @@ class JavetWorldgenRuntime : AutoCloseable {
                         "WASM init likely failed silently. Check the WASM " +
                         "bundle and module resolver."
                 )
+
         } catch (t: Throwable) {
             // Constructor failed — release native resources before
             // propagating, otherwise the NodeRuntime leaks.
@@ -123,9 +128,8 @@ class JavetWorldgenRuntime : AutoCloseable {
         }
     }
 
-    /** coord in, trimmed JSON out. Serialized via internal mutex. */
-    suspend fun generate(coord: String): String =
-        mutex.withLock { generateFn.callString(null, coord) }
+    suspend fun generate(coordinate: String): String =
+        mutex.withLock { generateFn.callString(null, coordinate) }
 
     /**
      * Close holds the mutex so an in-flight generate finishes naturally
@@ -144,6 +148,7 @@ class JavetWorldgenRuntime : AutoCloseable {
      * but the OS reaps the process anyway.
      */
     override fun close() = runBlocking {
+
         try {
             withTimeout(3.seconds) {
                 mutex.withLock {
@@ -162,7 +167,7 @@ class JavetWorldgenRuntime : AutoCloseable {
 
     private fun loadClasspathBytes(path: String): ByteArray {
         val cl = Thread.currentThread().contextClassLoader
-            ?: JavetWorldgenRuntime::class.java.classLoader
+            ?: WorldgenRuntime::class.java.classLoader
         return cl.getResourceAsStream(path)
             ?.use { it.readBytes() }
             ?: error("Classpath resource not found: $path")
@@ -170,7 +175,7 @@ class JavetWorldgenRuntime : AutoCloseable {
 
     private fun loadClasspathString(path: String): String? {
         val cl = Thread.currentThread().contextClassLoader
-            ?: JavetWorldgenRuntime::class.java.classLoader
+            ?: WorldgenRuntime::class.java.classLoader
         return cl.getResourceAsStream(path)
             ?.use { it.readBytes().decodeToString() }
     }

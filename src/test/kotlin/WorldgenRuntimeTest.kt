@@ -21,36 +21,19 @@ import org.junit.Before
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 private const val COORDINATE = "PRE-C-719330309-0-0-ZB937"
 
-class JavetWorldgenRuntimeTest {
+class WorldgenRuntimeTest {
 
-    private val jsonTestData = JavetWorldgenRuntimeTest::class.java.getResourceAsStream("sample.json")!!
+    private val jsonTestData = WorldgenRuntimeTest::class.java.getResourceAsStream("sample.json")!!
         .readAllBytes()
         .decodeToString()
-
-    private lateinit var runtime: JavetWorldgenRuntime
-
-    @Before
-    fun gateAndBoot() {
-        Assume.assumeTrue(
-            "Set SKIP_WASM_TESTS=1 to skip; current host has no Javet native or you're skipping intentionally.",
-            System.getenv("SKIP_WASM_TESTS").isNullOrBlank()
-        )
-        runtime = JavetWorldgenRuntime()
-    }
-
-    @AfterTest
-    fun shutDown() {
-        if (::runtime.isInitialized) runtime.close()
-    }
 
     @Test
     fun testGenerateForSample() = runTest {
 
-        val raw = runtime.generate(COORDINATE) + "\n"
+        val raw = WorldgenRuntime.generate(COORDINATE) + "\n"
 
         assertEquals(
             expected = jsonTestData,

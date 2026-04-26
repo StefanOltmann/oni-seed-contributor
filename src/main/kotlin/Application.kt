@@ -15,23 +15,22 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+import io.ktor.server.application.Application
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
-import kotlin.time.Duration.Companion.seconds
 
 fun main() {
 
-    val runtime = JavetWorldgenRuntime()
-    val service = WorldgenService(
-        generator = runtime::generate,
-        timeout = (System.getenv("WORLDGEN_TIMEOUT_SECONDS")?.toIntOrNull() ?: 30).seconds,
+    /* Ensure we safely close resources on JVM shutdown. */
+    Runtime.getRuntime().addShutdownHook(
+        Thread { WorldgenRuntime.close() }
     )
 
-    Runtime.getRuntime().addShutdownHook(Thread { runtime.close() })
-
+    /* Start the server. */
     embeddedServer(
         factory = Netty,
-        port = System.getenv("WORLDGEN_PORT")?.toIntOrNull() ?: 8080,
+        port = 8080,
         host = "0.0.0.0",
-    ) { configureRouting(service) }.start(wait = true)
+        module = Application::configureRouting
+    ).start(wait = true)
 }
