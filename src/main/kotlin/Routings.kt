@@ -23,6 +23,7 @@ import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
+import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
@@ -46,16 +47,42 @@ fun Application.configureRouting() {
             call.respondText("ONI seed contributor $VERSION")
         }
 
+        /*
+         * For debug purposes, return a generated cluster.
+         */
         get("/generate/{coordinate}") {
 
             val coordinate = call.parameters["coordinate"]!!
 
             val json  = WorldgenRuntime.generate(coordinate)
 
-            call.respondText(
-                text = json,
-                contentType = ContentType.Application.Json
+            val mapData = WorldgenMapData.fromJson(json)
+
+            val cluster = WorldgenMapDataConverter.convert(
+                mapData = mapData,
+                gameVersion = 42 // FIXME
             )
+
+            call.respond(cluster)
+        }
+
+        get("/status") {
+
+            // TODO Report what the ContributorService is doing.
+        }
+
+        get("/start") {
+
+            val apiKey: String? = this.call.request.headers["API_KEY"]
+
+            // TODO check API key & start the worldgen
+        }
+
+        get("/stop") {
+
+            val apiKey: String? = this.call.request.headers["API_KEY"]
+
+            // TODO check API key & stop the worldgen
         }
     }
 }
