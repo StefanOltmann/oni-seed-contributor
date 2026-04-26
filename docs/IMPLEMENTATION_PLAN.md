@@ -37,10 +37,8 @@ src/test/kotlin/
     WorldgenServiceTest.kt      CREATE (lambda fakes; pure JVM, no V8)
     RoutingsTest.kt             CREATE (Ktor testApplication + lambda fake)
     JavetWorldgenRuntimeTest.kt CREATE (real V8; gated via SKIP_WASM_TESTS env)
-    worldgen/
-        WorldgenModels.kt          CREATE (verbatim copy from oni-seed-browser)
-        WorldgenMapDataConverter.kt CREATE (verbatim copy from oni-seed-browser)
-        CoordinateUtil.kt           CREATE (verbatim copy from oni-seed-browser)
+    WorldgenModels.kt           CREATE (verbatim copy from oni-seed-browser)
+    WorldgenMapDataConverter.kt CREATE (verbatim copy from oni-seed-browser)
     WorldgenTest.kt             DELETE (replaced by the three above)
 
 src/test/resources/
@@ -203,15 +201,18 @@ class WorldgenServiceTest {
     }
 
     @Test
-    fun `slow generator becomes Timeout`() = runTest {
+    fun `slow generator becomes Timeout (and would self-terminate in production)`() = runTest {
+        var terminationRequestedFor: String? = null
         val svc = WorldgenService(
             generator = { delay(10.seconds); "never" },
             timeout = 50.milliseconds,
+            onTimeout = { coord -> terminationRequestedFor = coord },
         )
         val err = svc.generate(VALID_COORD).exceptionOrNull()
         assertIs<WorldgenError.Timeout>(err)
         assertEquals(VALID_COORD, err.coord)
         assertEquals(50.milliseconds, err.after)
+        assertEquals(VALID_COORD, terminationRequestedFor) // production would have exited(70) here
     }
 
     @Test
@@ -251,7 +252,7 @@ sealed class WorldgenError(val code: String, message: String) : Throwable(messag
     class WasmFailure(val coord: String, detail: String?) :
         WorldgenError(
             code = "WASM_FAILURE",
-            message = "WASM rejected coordinate '$coord': ${detail ?: "no detail"}",
+            message = "WASM rejected coordinate '$coord': $detail",
         )
 
     class Timeout(val coord: String, val after: Duration) :
@@ -264,6 +265,7 @@ sealed class WorldgenError(val code: String, message: String) : Throwable(messag
 class WorldgenService(
     private val generator: suspend (String) -> String,
     private val timeout: Duration = 30.seconds,
+    private val onTimeout: (coord: String) -> Unit = ::scheduleSelfTermination,
 ) {
     suspend fun generate(coord: String): Result<String> {
         if (!ClusterType.isValidCoordinate(coord))
@@ -271,10 +273,37 @@ class WorldgenService(
         return try {
             Result.success(withTimeout(timeout) { generator(coord) })
         } catch (e: TimeoutCancellationException) {
+            // Fire-and-forget: schedule process exit asynchronously so this
+            // coroutine can still return the Result.failure to the route,
+            // which writes the 504 to the client BEFORE the JVM dies.
+            // See docs/DESIGN_DECISION_LOG.md DD-011.
+            onTimeout(coord)
             Result.failure(WorldgenError.Timeout(coord, timeout))
         } catch (e: JavetException) {
             Result.failure(WorldgenError.WasmFailure(coord, e.message))
         }
+    }
+}
+
+/**
+ * Default `onTimeout`: spawn a non-daemon thread that waits ~2s for
+ * the 504 response to flush, then calls exitProcess(70). The orchestrator
+ * (Docker / k8s `restart: on-failure`) brings the container back. The
+ * runaway V8 thread is unkillable from in-process; only exit frees its
+ * CPU and unjams the mutex. Tests inject a no-op (`onTimeout = { _ -> }`)
+ * so the test JVM survives.
+ */
+private fun scheduleSelfTermination(coord: String) {
+    Thread {
+        Thread.sleep(2_000)
+        System.err.println(
+            "[FATAL] Worldgen timeout for '$coord' — exiting (70). Orchestrator should restart."
+        )
+        kotlin.system.exitProcess(70)
+    }.apply {
+        isDaemon = false
+        name = "worldgen-self-termination"
+        start()
     }
 }
 ```
@@ -334,7 +363,8 @@ class RoutingsTest {
 
         val response = client.get("/generate/$VALID")
         assertEquals(HttpStatusCode.OK, response.status)
-        assertEquals("application/json; charset=UTF-8", response.headers["Content-Type"])
+        // Ktor 3 may emit "application/json" or "application/json; charset=UTF-8".
+        assertTrue(response.headers["Content-Type"]!!.startsWith("application/json"))
         assertEquals("""{"hello":"world"}""", response.bodyAsText())
     }
 
@@ -366,6 +396,7 @@ class RoutingsTest {
         val service = WorldgenService(
             generator = { delay(10_000); "never" },
             timeout = 50.milliseconds,
+            onTimeout = { _ -> /* no-op so the test JVM survives */ },
         )
         application { configureRouting(service) }
 
@@ -376,7 +407,7 @@ class RoutingsTest {
     }
 
     @Test
-    fun `root route still serves uptime banner`() = testApplication {
+    fun `root route serves a version banner`() = testApplication {
         val service = WorldgenService({ "" }, timeout = 5.seconds)
         application { configureRouting(service) }
 
@@ -429,8 +460,6 @@ import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import kotlinx.serialization.Serializable
-import kotlin.time.Clock
-import kotlin.time.ExperimentalTime
 
 @Serializable
 data class ErrorBody(
@@ -439,12 +468,9 @@ data class ErrorBody(
     val coordinate: String? = null,
 )
 
-@OptIn(ExperimentalTime::class)
 fun Application.configureRouting(service: WorldgenService) {
 
-    val startTime = Clock.System.now().toEpochMilliseconds()
-
-    log("[INIT] Starting Server at version $VERSION")
+    println("[INIT] Starting Server at version $VERSION")
 
     install(ContentNegotiation) { json() }
 
@@ -459,22 +485,13 @@ fun Application.configureRouting(service: WorldgenService) {
     routing {
 
         get("/") {
-            val uptimeMinutes = (Clock.System.now().toEpochMilliseconds() - startTime) / 1000 / 60
-            val uptimeHours = uptimeMinutes / 60
-            val minutes = uptimeMinutes % 60
-            call.respondText(
-                "ONI seed contributor $VERSION (up since $uptimeHours hours and $minutes minutes)"
-            )
+            call.respondText("ONI seed contributor $VERSION")
         }
 
         get("/generate/{coord}") {
-            val coord = call.parameters["coord"] ?: run {
-                call.respond(
-                    HttpStatusCode.BadRequest,
-                    ErrorBody("INVALID_COORDINATE", "Missing coordinate path parameter")
-                )
-                return@get
-            }
+            // Ktor guarantees {coord} is present (the route wouldn't match
+            // otherwise), so !! is safe.
+            val coord = call.parameters["coord"]!!
             service.generate(coord)
                 .onSuccess { call.respondText(it, ContentType.Application.Json) }
                 .onFailure { e -> respondWorldgenError(call, e) }
@@ -496,13 +513,12 @@ private suspend fun respondWorldgenError(call: ApplicationCall, e: Throwable) {
     }
     call.respond(status, body)
 }
-
-private fun log(message: String) = println(message)
 ```
 
-Note: this file no longer uses `httpClient`, `kotlin.uuid.Uuid`, or
-`ExperimentalSerializationApi` — those were left over from earlier code.
-Drop the unused imports.
+Note: this file no longer uses `httpClient`, `kotlin.uuid.Uuid`,
+`kotlin.time.Clock`, or `ExperimentalSerializationApi` — those were left
+over from the earlier scaffold. Drop them entirely (the `/` route's
+uptime banner is replaced by a plain version banner per design).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -525,9 +541,8 @@ git commit -m "Add /generate/{coord} route with sealed-error-to-HTTP mapping"
 ## Task 4: Vendor the frontend's WorldgenMapData + Converter into test sources
 
 **Files:**
-- Create: `src/test/kotlin/worldgen/WorldgenModels.kt`
-- Create: `src/test/kotlin/worldgen/WorldgenMapDataConverter.kt`
-- Create: `src/test/kotlin/worldgen/CoordinateUtil.kt`
+- Create: `src/test/kotlin/WorldgenModels.kt`
+- Create: `src/test/kotlin/WorldgenMapDataConverter.kt`
 
 The integration test for `JavetWorldgenRuntime` (next task) round-trips
 the WASM output through the same parser + converter the frontend uses.
@@ -535,30 +550,34 @@ Those types live in `oni-seed-browser` (frontend) and aren't published
 as a library. Copy them verbatim into our test sources rather than
 introducing a build-time dependency on the frontend module.
 
-- [ ] **Step 1: Copy the three files from `oni-seed-browser`**
+`CoordinateUtil.kt` is intentionally NOT vendored — neither
+`WorldgenModels.kt` nor `WorldgenMapDataConverter.kt` references it. If
+a later step turns out to need it, vendor it then.
+
+- [ ] **Step 1: Copy the two files from `oni-seed-browser`**
 
 Source paths in the sibling repo:
 
 ```
 C:/Users/farre/IdeaProjects/oni-seed-browser/app/src/commonMain/kotlin/worldgen/WorldgenModels.kt
 C:/Users/farre/IdeaProjects/oni-seed-browser/app/src/commonMain/kotlin/worldgen/WorldgenMapDataConverter.kt
-C:/Users/farre/IdeaProjects/oni-seed-browser/app/src/commonMain/kotlin/worldgen/CoordinateUtil.kt
 ```
 
 Copy each verbatim to:
 
 ```
-src/test/kotlin/worldgen/WorldgenModels.kt
-src/test/kotlin/worldgen/WorldgenMapDataConverter.kt
-src/test/kotlin/worldgen/CoordinateUtil.kt
+src/test/kotlin/WorldgenModels.kt
+src/test/kotlin/WorldgenMapDataConverter.kt
 ```
 
 The package declaration `package worldgen` stays as-is in the source —
-match it.
+match it. (Yes, the file is in `src/test/kotlin/` but the package is
+`worldgen`. Kotlin doesn't require physical and logical layouts to
+match; this keeps the verbatim-copy promise honest.)
 
 - [ ] **Step 2: Add a header comment on each file documenting the source**
 
-Prepend each of the three files (immediately after the existing license
+Prepend each of the two files (immediately after the existing license
 header) with:
 
 ```kotlin
@@ -583,7 +602,7 @@ If a `Cluster`/`Asteroid`/`GeyserType`/etc. import doesn't resolve, those types 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/test/kotlin/worldgen/
+git add src/test/kotlin/WorldgenModels.kt src/test/kotlin/WorldgenMapDataConverter.kt
 git commit -m "Vendor WorldgenMapData + Converter from oni-seed-browser into test sources"
 ```
 
@@ -661,7 +680,20 @@ class JavetWorldgenRuntimeTest {
     fun `result round-trips through frontend WorldgenMapDataConverter`() = runTest {
         val raw = runtime.generate(COORD)
 
-        val mapData = WorldgenMapData.fromJson(raw)
+        // The vendored WorldgenMapData.fromJson uses ignoreUnknownKeys=false
+        // (strict). The WASM bundle frequently grows fields the model doesn't
+        // know about — drift between the npm package and the vendored model
+        // is expected and not a regression. Use a tolerant decoder for the
+        // *structural* round-trip; the typed-array leak test (above) is
+        // what guards the strip behaviour.
+        val tolerantJson = kotlinx.serialization.json.Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+        }
+        val mapData = tolerantJson.decodeFromString(
+            kotlinx.serialization.serializer<WorldgenMapData>(),
+            raw
+        )
         val cluster = WorldgenMapDataConverter.convert(mapData, gameVersion = 0)
 
         assertEquals(COORD, cluster.coordinate)
@@ -682,6 +714,7 @@ Create `src/main/kotlin/JavetWorldgenRuntime.kt`:
 ```kotlin
 import com.caoccao.javet.interop.NodeRuntime
 import com.caoccao.javet.interop.V8Host
+import com.caoccao.javet.values.reference.V8ValueArrayBuffer
 import com.caoccao.javet.values.reference.V8ValueFunction
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -702,13 +735,29 @@ class JavetWorldgenRuntime : AutoCloseable {
 
     init {
         try {
-            // 1. Bind the WASM bytes onto globalThis so the bootstrap
-            //    module can build a WebAssembly.Module from them
-            //    synchronously (no fetch/fs needed).
+            // Log resolved native lib path early — if Javet fails to load
+            // the platform native (musl/Alpine, missing arm64), this is
+            // where the failure is most usefully visible.
+            println(
+                "[INIT] Javet native: " +
+                    "reloadable=${V8Host.getNodeInstance().isLibraryReloadable}"
+            )
+
+            // 1. Bind the WASM bytes onto globalThis as a real V8
+            //    ArrayBuffer (Javet's globalObject.set(String, ByteArray)
+            //    does NOT auto-marshal to a JS BufferSource — passing a
+            //    raw ByteArray leaves an opaque Java reference that
+            //    `new WebAssembly.Module(...)` rejects).
             val wasmBytes = loadClasspathBytes("worldgen/oni_wasm_bg.wasm")
-            nodeRuntime.globalObject.set("wasmBytes", wasmBytes)
+            nodeRuntime.createV8ValueArrayBuffer(wasmBytes.size).use { buf: V8ValueArrayBuffer ->
+                buf.fromBytes(wasmBytes)
+                nodeRuntime.globalObject.set("wasmBytes", buf)
+            }
 
             // 2. Resolve `./<name>` ES-module specifiers from classpath.
+            //    The resolver fires during the bootstrap module's
+            //    compilation, when the bootstrap's `import` statements
+            //    are encountered.
             nodeRuntime.setV8ModuleResolver { runtime, name, _ ->
                 val basename = name.removePrefix("./")
                 val src = loadClasspathString("worldgen/$basename")
@@ -719,26 +768,51 @@ class JavetWorldgenRuntime : AutoCloseable {
                     .compileV8Module()
             }
 
-            // 3. Run the bootstrap module: instantiate WASM, install
-            //    `__generate` on globalThis. The JS strip MUST run before
+            // 3. Compile and execute the bootstrap module. We compile
+            //    explicitly (rather than relying on the executor's
+            //    "compile + execute" shortcut) because the bootstrap uses
+            //    top-level `await init(...)`. compileV8Module returns an
+            //    IV8Module; executeVoid on the module evaluates it,
+            //    leaving a pending Promise on the microtask queue.
+            //    The JS strip inside __generate MUST run before
             //    JSON.stringify — otherwise typed-array fields serialize
             //    as {"0":v,"1":v,...} objects instead of being omitted.
             nodeRuntime.getExecutor(BOOTSTRAP_SRC)
                 .setResourceName("./bootstrap.mjs")
                 .setModule(true)
-                .executeVoid()
+                .compileV8Module()
+                .use { module -> module.executeVoid() }
 
-            // 4. Drain the microtask queue that `await init(...)` left.
+            // 4. Drain the microtask queue and the Node event loop until
+            //    `await init(...)` completes (or fails). Without this,
+            //    __generate may not yet be installed on globalThis when
+            //    we try to look it up below.
             nodeRuntime.await()
 
+            // If WASM init rejected, the unhandled-rejection signal is
+            // our only cue. Surface it as a hard failure.
+            check(!nodeRuntime.isDead) {
+                "NodeRuntime died during bootstrap (likely WASM init failure)"
+            }
+
             // 5. Cache the `__generate` function so per-call invocation
-            //    skips re-resolving the global.
+            //    skips re-resolving the global. If init silently failed,
+            //    this get() returns a non-V8ValueFunction and the cast
+            //    throws — turning "function is undefined" into a clear
+            //    classpath/bootstrap error.
             generateFn = nodeRuntime.globalObject.get("__generate")
+                ?: error(
+                    "Bootstrap did not install globalThis.__generate — " +
+                        "WASM init likely failed silently. Check the WASM " +
+                        "bundle and module resolver."
+                )
         } catch (t: Throwable) {
             // Constructor failed — release native resources before
             // propagating, otherwise the NodeRuntime leaks.
-            try { nodeRuntime.setPurgeEventLoopBeforeClose(true); nodeRuntime.close() }
-            catch (_: Throwable) { /* swallow */ }
+            try {
+                nodeRuntime.setPurgeEventLoopBeforeClose(true)
+                nodeRuntime.close()
+            } catch (_: Throwable) { /* swallow */ }
             throw t
         }
     }
@@ -753,16 +827,20 @@ class JavetWorldgenRuntime : AutoCloseable {
         nodeRuntime.close()
     }
 
-    private fun loadClasspathBytes(path: String): ByteArray =
-        Thread.currentThread().contextClassLoader
-            .getResourceAsStream(path)
+    private fun loadClasspathBytes(path: String): ByteArray {
+        val cl = Thread.currentThread().contextClassLoader
+            ?: JavetWorldgenRuntime::class.java.classLoader
+        return cl.getResourceAsStream(path)
             ?.use { it.readBytes() }
             ?: error("Classpath resource not found: $path")
+    }
 
-    private fun loadClasspathString(path: String): String? =
-        Thread.currentThread().contextClassLoader
-            .getResourceAsStream(path)
+    private fun loadClasspathString(path: String): String? {
+        val cl = Thread.currentThread().contextClassLoader
+            ?: JavetWorldgenRuntime::class.java.classLoader
+        return cl.getResourceAsStream(path)
             ?.use { it.readBytes().decodeToString() }
+    }
 }
 
 /**
@@ -830,12 +908,12 @@ Expected: PASS, 3 tests (locally on Windows where the Javet native is available)
 
 If any assertion fails:
 
-- **`generate returns a non-empty JSON string` fails with a `JavetCompilationException` or "module not found":** the module resolver isn't finding `./oni_wasm.js` or `./index.js`. Verify those files exist at `src/main/resources/worldgen/` and that the resource path used by `loadClasspathString` is `worldgen/<basename>` (not `/worldgen/...`).
-- **Test fails with "TypeError: WebAssembly.Module: Argument 0 must be of type ArrayBuffer or Uint8Array":** Javet may have wrapped the byte[] as a different V8 type. Switch the binding to use `nodeRuntime.createV8ValueArrayBuffer(wasmBytes.size).also { it.fromBytes(wasmBytes) }` and bind that instead, then reference it from JS with no further conversion.
-- **Test fails because `generateFn.invokeString` returns null or throws:** verify `generateFn` is non-null after construction. Add `println(nodeRuntime.globalObject.get<com.caoccao.javet.values.V8Value>("__generate"))` in `init` to confirm the global was set; if it wasn't, the bootstrap module errored silently — wrap `executeVoid()` in a try/catch and log.
-- **`result round-trips through frontend WorldgenMapDataConverter` fails with "missing field" from kotlinx.serialization:** the WASM bundle has drifted from what `WorldgenMapData` expects (it's `ignoreUnknownKeys = false`). Either bump the vendored `WorldgenModels.kt` to match the upstream npm package, or relax the test to use `Json { ignoreUnknownKeys = true }.decodeFromString<WorldgenMapData>(raw)` and document the drift.
+- **`generate returns a non-empty JSON string` fails with `JavetCompilationException` or "module not found":** the module resolver isn't finding `./oni_wasm.js` or `./index.js`. Verify those files exist at `src/main/resources/worldgen/` and that `loadClasspathString` builds the path as `worldgen/<basename>` (not `/worldgen/...`).
+- **Test fails with "Bootstrap did not install globalThis.__generate":** the bootstrap module compiled but `await init(...)` rejected silently, OR `executeVoid()` returned before the microtask drained. Check that step 4 (`nodeRuntime.await()`) actually ran and that `nodeRuntime.isDead` is false. Wrap the bootstrap's WASM compile in `try { ... } catch (e) { console.error(e); throw e; }` to surface the real reason — Javet pipes JS console output to stderr by default.
+- **Test fails with "TypeError: WebAssembly.Module: Argument 0 must be of type ArrayBuffer or Uint8Array":** the `createV8ValueArrayBuffer` + `fromBytes` binding above should prevent this. If it persists, you may be on a Javet build where `set(String, V8Value)` doesn't preserve the binding type — try `globalObject.set("wasmBytes", nodeRuntime.createV8ValueTypedArray(V8ValueReferenceType.Uint8Array, wasmBytes.size).apply { fromBytes(wasmBytes) })` instead.
+- **`result round-trips through frontend WorldgenMapDataConverter` fails with "missing field" from kotlinx.serialization:** the WASM bundle has drifted from what `WorldgenMapData` expects (it's `ignoreUnknownKeys = false`). The test below has already been written to use a tolerant Json — but if it still fails, bump the vendored `WorldgenModels.kt` to match the upstream npm package version.
 
-If you can't run the test locally (e.g., Javet native missing), set `SKIP_WASM_TESTS=1` to confirm the assume-skip works, then run it in CI / Docker.
+If you can't run the test locally (e.g., Javet native missing), set `SKIP_WASM_TESTS=1` to confirm the assume-skip works, then rely on CI / Docker for actual coverage.
 
 - [ ] **Step 6: Commit**
 
@@ -897,18 +975,17 @@ fun main() {
         factory = Netty,
         port = System.getenv("WORLDGEN_PORT")?.toIntOrNull() ?: 8080,
         host = "0.0.0.0",
-    ) { module(service) }.start(wait = true)
+    ) { configureRouting(service) }.start(wait = true)
 }
-
-fun Application.module(service: WorldgenService) =
-    configureRouting(service)
 ```
 
 Specifically removed:
 - the side-effecting `Worldgen.generate("PRE-C-...")` call before
   `embeddedServer` (debug-only, would crash if WASM init failed and
   prevent the server from binding)
-- the parameterless `module()` overload — there's now only one shape
+- the parameterless `Application.module()` overload AND the parameterized
+  `Application.module(service)` shim — the design inlines
+  `configureRouting(service)` directly into `embeddedServer { ... }`
 
 - [ ] **Step 2: Verify build + all tests still pass**
 
@@ -1021,10 +1098,9 @@ src/main/kotlin/Routings.kt
 src/main/kotlin/WorldgenService.kt
 src/test/kotlin/JavetWorldgenRuntimeTest.kt
 src/test/kotlin/RoutingsTest.kt
+src/test/kotlin/WorldgenMapDataConverter.kt
+src/test/kotlin/WorldgenModels.kt
 src/test/kotlin/WorldgenServiceTest.kt
-src/test/kotlin/worldgen/CoordinateUtil.kt
-src/test/kotlin/worldgen/WorldgenMapDataConverter.kt
-src/test/kotlin/worldgen/WorldgenModels.kt
 ```
 
 No `Worldgen.kt`, no `WorldgenTest.kt`. Four production files in the

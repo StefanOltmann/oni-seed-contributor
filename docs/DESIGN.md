@@ -253,6 +253,7 @@ sealed class WorldgenError(val code: String, message: String) : Throwable(messag
 class WorldgenService(
     private val generator: suspend (String) -> String,
     private val timeout: Duration = 30.seconds,
+    private val onTimeout: (coord: String) -> Unit = ::scheduleSelfTermination,
 ) {
     suspend fun generate(coord: String): Result<String> {
         if (!ClusterType.isValidCoordinate(coord))
@@ -260,10 +261,36 @@ class WorldgenService(
         return try {
             Result.success(withTimeout(timeout) { generator(coord) })
         } catch (e: TimeoutCancellationException) {
+            // Fire-and-forget: schedule process exit asynchronously so
+            // this coroutine can still return the Result.failure to the
+            // route, which then writes the 504 to the client BEFORE the
+            // JVM dies. The runaway V8 thread is unkillable from
+            // in-process; only exit frees its CPU and unjams the mutex.
+            // See DESIGN_DECISION_LOG.md DD-011.
+            onTimeout(coord)
             Result.failure(WorldgenError.Timeout(coord, timeout))
         } catch (e: JavetException) {
             Result.failure(WorldgenError.WasmFailure(coord, e.message))
         }
+    }
+}
+
+/**
+ * Default `onTimeout` handler: spawn a non-daemon thread that sleeps
+ * briefly (long enough for the 504 response to flush over the wire),
+ * then calls `exitProcess(70)` (`70 == EX_SOFTWARE`).
+ *
+ * Tests pass a no-op (`onTimeout = { _ -> }`) so the test JVM survives.
+ */
+private fun scheduleSelfTermination(coord: String) {
+    Thread {
+        Thread.sleep(2_000) // give the route ~2 s to flush the response
+        System.err.println("[FATAL] Worldgen timeout for '$coord' — exiting (70). Orchestrator should restart.")
+        kotlin.system.exitProcess(70)
+    }.apply {
+        isDaemon = false
+        name = "worldgen-self-termination"
+        start()
     }
 }
 ```
@@ -410,30 +437,54 @@ Result.success(String)
 - When v2 introduces a pool, the call sites change but the contract
   doesn't. Backpressure beyond OS socket queues is out of scope.
 
-### Timeout interaction (no poison/rebuild)
+### Timeout interaction: crash and restart
 
 `withTimeout` cancels the *coroutine*, not the V8 call. The V8 call
 keeps running on its native thread until it returns; while that's in
-flight, the mutex is still held. The next request then waits for the
-slow coordinate to finish, *then* runs.
+flight, the mutex is still held. Javet's `terminateExecution()` cannot
+interrupt code executing inside the WASM compartment, only JS code
+between WASM calls — so there is no in-process way to free the runaway
+thread.
 
-This is intentional. The previous revision proposed a "poison + rebuild"
-mechanism: mark the runtime poisoned on timeout, rebuild on the next
-acquire. Two reasons we cut it for v1:
+Two earlier strategies and why they failed:
 
-- **Cost is wrong direction.** Rebuild costs ~1–3 s; the timeout already
-  cost the user 30 s. Adding a second cost in front of unrelated traffic
-  is worse than letting the slow call drain.
-- **`terminateExecution` doesn't reach WASM.** Javet exposes
-  `nodeRuntime.terminateExecution()`, but it cannot interrupt a
-  running WASM call — only JS code between WASM calls. So even with
-  poison-and-rebuild, the runaway thread keeps consuming CPU until
-  natural exit. Rebuild only frees the mutex slot; it doesn't free the
-  thread.
+- **Poison + rebuild on next acquire** — frees the mutex slot but not
+  the thread; rebuild costs another ~1–3 s on top of the 30 s already
+  lost; doesn't actually solve anything.
+- **Drain the mutex** (just let the slow call finish) — worst case is
+  catastrophic: one bad coord runs forever → mutex held forever → every
+  subsequent request waits for the lock and times out → service is a
+  permanent 504 generator until the container is killed.
 
-If timeouts become a real operational problem, the v2 fix is N runtimes
-(N>1 means a slow one doesn't block all traffic) or a hard process kill
-(let an orchestrator restart us). Both are bigger changes than v1.
+**v1 strategy: crash and let the orchestrator restart.** When
+`WorldgenService` catches `TimeoutCancellationException`, after building
+the `WorldgenError.Timeout` to return, it calls
+`kotlin.system.exitProcess(70)` (`70 == EX_SOFTWARE`). The Docker /
+k8s `restart: on-failure` policy brings the container back; the new
+process re-pays the ~1–3 s cold start and then serves traffic again.
+
+What this trades:
+
+- **Loses:** any other in-flight requests at the moment of timeout are
+  dropped. The next `/generate` after restart pays cold-start latency.
+  No "graceful degradation."
+- **Gains:** the runaway V8 thread dies with the process — CPU is
+  actually freed, not just queued behind a dead mutex. Failures show up
+  as restart counts an operator can alert on. Honest, observable
+  behaviour. Bounded recovery time.
+
+The crash happens *after* the `WorldgenError.Timeout` is propagated up
+to the route, so the requesting client still receives a `504` with the
+structured error body before the process dies. Any later requests on
+the same TCP connection fail; clients retry against the restarted
+container.
+
+When v2 introduces a multi-runtime pool, this strategy can soften — a
+slow runtime can be killed in isolation while the others keep serving.
+That's a bigger change than v1 warrants.
+
+See `docs/DESIGN_DECISION_LOG.md` DD-009/010/011 for the full reasoning
+trail.
 
 ## Error Handling
 
@@ -514,8 +565,11 @@ just a lambda — no fake class, no interface. Cases:
   the copies with a comment pinning their source commit and the npm
   package version.
 
-Tagged `wasm` so `gradle test -PexcludeTags=wasm` skips on constrained
-platforms. Default `gradle test` runs them.
+Gated via `org.junit.Assume.assumeTrue(System.getenv("SKIP_WASM_TESTS").isNullOrBlank())`
+in a `@Before` so CI on platforms without a Javet native (or where it's
+heavy) can opt out by setting the env var. Default `gradle test` runs
+them. Simpler than JUnit `@Tag` filtering and works with the `kotlin-test-junit`
+(JUnit 4) artifact already in the catalog.
 
 ### End-to-end — Ktor route
 
