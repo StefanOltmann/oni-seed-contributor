@@ -1,0 +1,60 @@
+[versions]
+kotlin = "2.3.20"
+ktor = "3.4.2"
+git-versioning = "6.4.4"
+logback = "1.4.14"
+javet = "5.0.6"
+oniSeedBrowserModel = "cc174d2"
+kotlinx-coroutines = "1.10.2"
+
+[libraries]
+# Ktor Server
+ktor-server-core = { module = "io.ktor:ktor-server-core-jvm", version.ref = "ktor" }
+ktor-server-netty = { module = "io.ktor:ktor-server-netty-jvm", version.ref = "ktor" }
+ktor-server-content-negotiation = { module = "io.ktor:ktor-server-content-negotiation", version.ref = "ktor" }
+ktor-server-compression = { module = "io.ktor:ktor-server-compression", version.ref = "ktor" }
+ktor-server-cors = { module = "io.ktor:ktor-server-cors", version.ref = "ktor" }
+ktor-server-auth = { module = "io.ktor:ktor-server-auth", version.ref = "ktor" }
+ktor-serialization-json = { module = "io.ktor:ktor-serialization-kotlinx-json", version.ref = "ktor" }
+oniSeedBrowserModel = { module = "de.stefan-oltmann:oni-seed-browser-model", version.ref = "oniSeedBrowserModel" }
+
+# Logging
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+
+# Ktor Client
+ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
+ktor-client-content-negotiation = { module = "io.ktor:ktor-client-content-negotiation", version.ref = "ktor" }
+
+# Javet (Node.js/V8 integration)
+javet-core = { module = "com.caoccao.javet:javet", version.ref = "javet" }
+javet-windows = { module = "com.caoccao.javet:javet-node-windows-x86_64", version.ref = "javet" }
+javet-linux-amd64 = { module = "com.caoccao.javet:javet-node-linux-x86_64", version.ref = "javet" }
+javet-linux-arm64 = { module = "com.caoccao.javet:javet-node-linux-arm64", version.ref = "javet" }
+
+# Coroutines
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
+
+# Ktor server testing
+ktor-server-test-host = { module = "io.ktor:ktor-server-test-host", version.ref = "ktor" }
+
+# Test libraries
+kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ktor = { id = "io.ktor.plugin", version.ref = "ktor" }
+git-versioning = { id = "me.qoomon.git-versioning", version.ref = "git-versioning" }
+
+[bundles]
+ktor-server = [
+    "ktor-server-core",
+    "ktor-server-netty",
+    "ktor-server-content-negotiation",
+    "ktor-server-compression",
+    "ktor-server-cors",
+    "ktor-server-auth",
+    "ktor-serialization-json"
+]
